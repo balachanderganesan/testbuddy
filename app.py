@@ -20,6 +20,7 @@ import sqlite3
 import threading
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from pathlib import Path
@@ -96,7 +97,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
-logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)  # suppress non-SSH banner noise
+logging.getLogger("paramiko.transport").setLevel(logging.WARNING)  # suppress non-SSH banner noise
 
 app = Flask(__name__)
 
@@ -244,8 +245,9 @@ def _detect_vm_type(hv_ip, console_port):
             timeout=SSH_TIMEOUT,
         )
         ssh.close()
-        if "edge"    in out: return "edge"
-        if "gateway" in out: return "gateway"
+        lines = out.splitlines()
+        if "edge"    in lines: return "edge"
+        if "gateway" in lines: return "gateway"
     except Exception:
         pass
     return None
@@ -288,18 +290,20 @@ def discover_on_hypervisor(hv, known_types):
                         "vm_port":      vm_port,
                     })
                     return
+                # Claim this IP before releasing the lock so other threads
+                # for the same VM (multiple DNAT rules) don't launch
+                # redundant SSH probes.
+                vm_seen.add(vm_ip)
             # New VM — probe via SSH to detect type.
             dtype = _detect_vm_type(hv["ip"], hv_port)
             if dtype:
                 with lock:
-                    if vm_ip not in vm_seen:
-                        vm_seen.add(vm_ip)
-                        found.append({
-                            "device_type":  dtype,
-                            "ip":           vm_ip,
-                            "console_port": hv_port,
-                            "vm_port":      vm_port,
-                        })
+                    found.append({
+                        "device_type":  dtype,
+                        "ip":           vm_ip,
+                        "console_port": hv_port,
+                        "vm_port":      vm_port,
+                    })
 
         probe_threads = [
             threading.Thread(target=_probe, args=rule, daemon=True)
@@ -392,14 +396,17 @@ def run_discovery(topology_id="chennai"):
                 conn.execute(
                     "UPDATE devices SET device_type=?,console_port=?,vm_port=?,last_seen=? WHERE ip=? AND hypervisor_id=?",
                     (d["device_type"], d["console_port"], vm_port, now, d["ip"], hv_id))
-            # Remove devices that disappeared from this hypervisor
+            # Remove devices that disappeared from this hypervisor.
+            # Skip deletion when found_ips is empty: iptables may be
+            # transiently flushed or all SSH probes may have timed out,
+            # which would incorrectly wipe all known devices.
             if found_ips:
                 placeholders = ",".join("?" * len(found_ips))
                 conn.execute(
                     f"DELETE FROM devices WHERE hypervisor_id=? AND ip NOT IN ({placeholders})",
                     (hv_id, *found_ips))
             else:
-                conn.execute("DELETE FROM devices WHERE hypervisor_id=?", (hv_id,))
+                log.warning(f"  [{hv['name']}] reachable but no VMs found — skipping stale cleanup")
 
     log.info(f"=== Discovery complete [{topology_id}] ===")
 
@@ -645,11 +652,11 @@ def run_poll():
         return
 
     log.info(f"Polling {len(devices)} devices (max {POLL_WORKERS} concurrent)...")
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=POLL_WORKERS) as pool:
-        futures = {pool.submit(poll_device, d): d for d in devices}
-        for f in as_completed(futures, timeout=len(devices) * (SSH_TIMEOUT + 5) / POLL_WORKERS + 30):
-            pass  # poll_device handles its own DB writes and errors
+        for d in devices:
+            pool.submit(poll_device, d)
+    # pool.__exit__ calls shutdown(wait=True) — blocks until all tasks finish.
+    # poll_device handles its own DB writes, SSH timeouts, and errors.
     log.info("Poll complete")
 
 
