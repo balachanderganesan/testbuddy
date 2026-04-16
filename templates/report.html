@@ -85,6 +85,113 @@
 
 <div class="container-fluid px-4">
 
+<!-- ── Check Alerts Summary ─────────────────────────────────────────────────── -->
+{% if report_data.check_alerts %}
+<div class="section-card" style="border-color:#d29922">
+  <div class="section-header" style="background:#2d2200">
+    <div class="d-flex align-items-center gap-2">
+      <i class="bi bi-shield-exclamation" style="color:#d29922"></i>
+      <strong style="color:#d29922">Check Alerts During Recording</strong>
+      <span class="badge bg-secondary" style="font-size:.65rem">{{ report_data.check_alerts|length }} total</span>
+    </div>
+  </div>
+  <div class="p-3">
+    <!-- Category summary -->
+    <div class="mb-2">
+      {% for ct, s in report_data.check_alert_summary.items() %}
+        <span class="badge bg-secondary me-1" style="font-size:.68rem">
+          {{ ct }}: {{ s.total }}
+          {% if s.critical %}<span style="color:#f85149">({{ s.critical }} crit)</span>{% endif %}
+          {% if s.warning %}<span style="color:#d29922">({{ s.warning }} warn)</span>{% endif %}
+        </span>
+      {% endfor %}
+    </div>
+    <!-- Alert rows -->
+    <div class="table-responsive">
+      <table class="table table-sm mb-0" style="background:transparent;font-size:.78rem">
+        <thead>
+          <tr><th>Level</th><th>Type</th><th>Device</th><th>IP</th><th>Detail</th><th>Seen</th><th>First</th><th>Last</th></tr>
+        </thead>
+        <tbody>
+          {% for a in report_data.check_alerts[:50] %}
+          <tr>
+            <td>
+              <span class="badge {% if a.alert_level == 'critical' %}badge-critical{% else %}badge-warning{% endif %}"
+                    style="font-size:.6rem">{{ a.alert_level|upper }}</span>
+            </td>
+            <td>{{ a.check_type }}</td>
+            <td>
+              {% if a.device_type == 'edge' %}<i class="bi bi-cpu text-primary me-1"></i>
+              {% else %}<i class="bi bi-diagram-3 text-success me-1"></i>{% endif %}
+              <strong>{{ a.vm_name or a.ip }}</strong>
+            </td>
+            <td><code style="font-size:.72rem">{{ a.ip }}</code></td>
+            <td>{{ a.alert_detail or '—' }}</td>
+            <td style="text-align:center">{{ a.occurrences or 1 }}&times;</td>
+            <td style="font-size:.72rem;color:#8b949e">{{ (a.first_seen or a.ts)[:19]|replace("T"," ") }}</td>
+            <td style="font-size:.72rem;color:#8b949e">{{ (a.last_seen or a.ts)[:19]|replace("T"," ") }}</td>
+          </tr>
+          {% endfor %}
+          {% if report_data.check_alerts|length > 50 %}
+          <tr><td colspan="8" class="text-muted text-center">… and {{ report_data.check_alerts|length - 50 }} more</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- ── Core Dump Alerts ──────────────────────────────────────────────────────── -->
+{% if report_data.core_alerts %}
+<div class="section-card" style="border-color:#f85149">
+  <div class="section-header" style="background:#2d0000">
+    <div class="d-flex align-items-center gap-2">
+      <i class="bi bi-bug-fill" style="color:#f85149"></i>
+      <strong style="color:#f85149">Core Dumps Detected During Recording</strong>
+      <span class="badge bg-secondary" style="font-size:.65rem">{{ report_data.core_alerts|length }} device{{ 's' if report_data.core_alerts|length > 1 }}</span>
+    </div>
+  </div>
+  <div class="p-3">
+    {% for a in report_data.core_alerts %}
+    <div style="margin-bottom:.6rem">
+      <div>
+        <i class="bi bi-bug-fill text-danger me-1"></i>
+        <strong>{{ a.device_name }}</strong>
+        <code class="text-muted" style="font-size:.72rem">{{ a.ip }}</code>
+        — {{ a.core_count }} core dump{{ 's' if a.core_count > 1 }}
+        {% if a.first_seen %}
+          <span class="text-muted" style="font-size:.72rem">first seen {{ a.first_seen[:19]|replace("T"," ") }}</span>
+        {% endif %}
+      </div>
+      {% if a.core_files %}
+      <div style="margin-left:1.5rem;font-size:.75rem;color:#8b949e;margin-top:2px">
+        {% for f in a.core_files %}
+          <div><code>{{ f.name }}</code>
+            {% if f.file_ts %}
+              <span class="text-muted">({{ f.file_ts|int }})</span>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if a.ha_core_files %}
+      <div style="margin-left:1.5rem;font-size:.75rem;color:#8b949e;margin-top:2px">
+        {% for f in a.ha_core_files %}
+          <div><code>[HA] {{ f.name }}</code>
+            {% if f.file_ts %}
+              <span class="text-muted">({{ f.file_ts|int }})</span>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- ── Summary Table ────────────────────────────────────────────────────────── -->
 <div class="section-card">
   <div class="section-header">
@@ -157,6 +264,10 @@
     <strong>{{ dev.vm_name or dev.ip }}</strong>
     <code class="text-muted" style="font-size:.72rem">{{ dev.ip }}</code>
     <span class="text-muted" style="font-size:.72rem">{{ dev.hypervisor_name }}</span>
+    {% for ca in dev.check_alerts or [] %}
+      <span class="badge {% if ca.alert_level == 'critical' %}badge-critical{% else %}badge-warning{% endif %}" style="font-size:.6rem"
+            title="{{ ca.alert_detail or '' }}">{{ ca.check_type }}</span>
+    {% endfor %}
     {% if sm.core_count_max > 0 %}
       <span class="badge badge-critical ms-1" style="font-size:.65rem">
         <i class="bi bi-bug-fill me-1"></i>{{ sm.core_count_max }} cores
