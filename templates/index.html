@@ -1051,7 +1051,7 @@ function _populateReportFilterOptions(options) {
   if (!filter) return;
   const prev = filter.value;
   filter.innerHTML = '<option value="">All Topologies</option>';
-  // Add only topology-level entries (not individual bastions which have hypervisor_id)
+  // Topology-level entries (no hypervisor_id)
   const topoOpts = options.filter(o => !o.hypervisor_id);
   if (topoOpts.length) {
     const og = document.createElement("optgroup");
@@ -1059,6 +1059,19 @@ function _populateReportFilterOptions(options) {
     topoOpts.forEach(o => {
       const opt = document.createElement("option");
       opt.value = o.value;
+      opt.textContent = o.label;
+      og.appendChild(opt);
+    });
+    filter.appendChild(og);
+  }
+  // Per-bastion entries (have hypervisor_id, value = "bastion_<id>")
+  const bastionOpts = options.filter(o => !!o.hypervisor_id);
+  if (bastionOpts.length) {
+    const og = document.createElement("optgroup");
+    og.label = "Standard Testbeds";
+    bastionOpts.forEach(o => {
+      const opt = document.createElement("option");
+      opt.value = o.value; // "bastion_<id>"
       opt.textContent = o.label;
       og.appendChild(opt);
     });
@@ -1246,8 +1259,13 @@ setInterval(() => {
 async function loadReports() {
   closeReportDetail();
   await loadActiveRecordings();
-  const tid = document.getElementById("reportTopoFilter").value;
-  const url = tid ? `/api/reports?topology=${tid}` : "/api/reports";
+  const val = document.getElementById("reportTopoFilter").value;
+  let url = "/api/reports";
+  if (val.startsWith("bastion_")) {
+    url += `?hypervisor_id=${val.slice("bastion_".length)}`;
+  } else if (val) {
+    url += `?topology=${encodeURIComponent(val)}`;
+  }
   const reports = await fetch(url).then(r => r.json());
   renderReportsList(reports);
 }
