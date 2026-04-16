@@ -201,10 +201,23 @@
   <button class="sc-pill" id="scPillTB4" onclick="switchScTab('sc_tb4')">TB4</button>
   <button class="sc-pill" id="scPillTB5" onclick="switchScTab('sc_tb5')">TB5</button>
 </div>
-<!-- Standard Testbeds setup panel -->
-<div id="standardSetupPanel" class="sc-bar" style="display:none">
-  <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
-    <span class="text-muted" style="font-size:.8rem"><i class="bi bi-plus-circle me-1"></i>Add Bastion Host:</span>
+<!-- Standard Testbeds sub-nav (per-bastion filter pills) -->
+<div id="standardSubNav" class="sc-bar" style="display:none">
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <button class="sc-pill active" id="stdPillAll" onclick="switchBastionTab(null)">
+      <i class="bi bi-collection me-1"></i>All
+    </button>
+    <div id="bastionPills" class="d-inline-flex align-items-center flex-wrap gap-1"></div>
+    <button class="btn btn-sm btn-outline-secondary ms-2" onclick="toggleBastionAddForm()"
+            style="font-size:.72rem;padding:.2rem .75rem;border-radius:20px;white-space:nowrap">
+      <i class="bi bi-plus me-1"></i>Add Bastion
+    </button>
+  </div>
+</div>
+<!-- Bastion add form (collapsed by default) -->
+<div id="bastionAddPanel" class="sc-bar" style="display:none;border-top:1px solid #21262d">
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <span class="text-muted" style="font-size:.8rem">New bastion host:</span>
     <input id="bastionName" class="form-control form-control-sm" style="max-width:140px" placeholder="Name (optional)">
     <input id="bastionIp"   class="form-control form-control-sm" style="max-width:150px" placeholder="IP address">
     <input id="bastionUser" class="form-control form-control-sm" style="max-width:110px" placeholder="Username">
@@ -214,7 +227,6 @@
     </button>
     <span id="bastionStatus" class="text-muted" style="font-size:.78rem"></span>
   </div>
-  <div id="bastionList" class="d-flex flex-wrap gap-2"></div>
 </div>
 
 <!-- Reports panel -->
@@ -449,6 +461,7 @@ const CRIT_FREE_PCT  = {{ crit_free_pct }};
 let allDevices      = [];
 let currentFilter   = "";
 let currentTopology = "chennai";
+let currentBastionId = null;   // null = show all bastion hosts; integer = filter to one
 let activeDeviceId  = null;
 let memChart        = null;
 let activeCorePopover = null;
@@ -485,8 +498,9 @@ function switchMainTab(which) {
   document.getElementById("mainTabStandard").classList.toggle("active", isStandard);
   document.getElementById("mainTabReports").classList.toggle("active", isReports);
 
-  document.getElementById("scSubNav").style.display           = isSC       ? "block" : "none";
-  document.getElementById("standardSetupPanel").style.display = isStandard ? "block" : "none";
+  document.getElementById("scSubNav").style.display         = isSC       ? "block" : "none";
+  document.getElementById("standardSubNav").style.display   = isStandard ? "block" : "none";
+  if (!isStandard) document.getElementById("bastionAddPanel").style.display = "none";
   document.getElementById("reportsPanel").style.display       = isReports  ? "block" : "none";
   document.getElementById("mainContent").style.display        = isReports  ? "none"  : "block";
   document.getElementById("topoLabel").style.display          = isReports  ? "none"  : "block";
@@ -503,6 +517,7 @@ function switchMainTab(which) {
     }
   } else if (isStandard) {
     currentTopology = "standard_testbeds";
+    currentBastionId = null;
     loadBastionHosts();
   } else {
     currentTopology = "chennai";
@@ -628,9 +643,15 @@ function freeColor(pct) {
 function slopeClass(s) { return s < -800 ? "slope-crit" : s < -200 ? "slope-warn" : "slope-ok"; }
 function slopeArrow(s) { return s < -50 ? "↓" : s > 50 ? "↑" : "→"; }
 
+// ── Bastion filter param (appended to API calls when a specific bastion is selected) ──────────
+function _bastionParam() {
+  return (currentTopology === "standard_testbeds" && currentBastionId != null)
+    ? `&hypervisor_id=${currentBastionId}` : "";
+}
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 async function loadSummary() {
-  const d = await fetch(`/api/summary?topology=${currentTopology}`).then(r => r.json());
+  const d = await fetch(`/api/summary?topology=${currentTopology}${_bastionParam()}`).then(r => r.json());
   document.getElementById("sumHV").textContent      = d.hypervisors.total;
   document.getElementById("sumHVsub").textContent   = d.hypervisors.reachable+" reachable";
   document.getElementById("sumEdge").textContent    = d.edges.total;
@@ -643,7 +664,7 @@ async function loadSummary() {
 
 // ── Alerts (summary card only) ────────────────────────────────────────────────
 async function loadAlerts() {
-  const alerts = await fetch(`/api/alerts?topology=${currentTopology}`).then(r => r.json());
+  const alerts = await fetch(`/api/alerts?topology=${currentTopology}${_bastionParam()}`).then(r => r.json());
   const crits = alerts.filter(a => a.alert === "critical").length;
   const warns = alerts.filter(a => a.alert === "warning").length;
   const sumA  = document.getElementById("sumAlerts");
@@ -698,7 +719,7 @@ function updateCoresBanner() {
 
 // ── Device table ──────────────────────────────────────────────────────────────
 async function loadDevices() {
-  const url = `/api/devices?topology=${currentTopology}${currentFilter ? "&type="+currentFilter : ""}`;
+  const url = `/api/devices?topology=${currentTopology}${currentFilter ? "&type="+currentFilter : ""}${_bastionParam()}`;
   allDevices = await fetch(url).then(r => r.json());
 
   // Sort: edges first, then gateways.
@@ -1435,30 +1456,54 @@ function toast(msg, level) {
 // ── Standard Testbeds: bastion host management ────────────────────────────────
 async function loadBastionHosts() {
   const hosts = await fetch("/api/bastion/list").then(r => r.json());
-  const el = document.getElementById("bastionList");
+  const el = document.getElementById("bastionPills");
+  if (!el) return;
   if (!hosts.length) {
-    el.innerHTML = '<span class="text-muted" style="font-size:.75rem">No bastion hosts added yet.</span>';
+    el.innerHTML = '<span class="text-muted" style="font-size:.75rem;margin-left:.25rem">No bastion hosts yet</span>';
     return;
   }
-  el.innerHTML = hosts.map(h => `
-    <span class="pill d-inline-flex align-items-center gap-2">
-      <i class="bi bi-hdd-network text-info"></i>
-      <span><strong>${h.name}</strong>
-        ${h.name !== h.ip ? `<code class="text-muted" style="font-size:.72rem">${h.ip}</code>` : ""}
-      </span>
-      <span class="text-muted" style="font-size:.72rem">${h.device_count} device${h.device_count !== 1 ? 's' : ''}</span>
-      <span class="badge ${h.reachable ? 'badge-ok' : 'badge-offline'}" style="font-size:.65rem">${h.reachable ? 'UP' : 'DOWN'}</span>
-      <button class="btn btn-sm btn-outline-danger py-0 px-1" style="font-size:.7rem"
-              onclick="event.stopPropagation();deleteBastionHost(${h.id},'${h.name}')">
-        <i class="bi bi-trash"></i>
-      </button>
-    </span>
-  `).join("");
+  el.innerHTML = hosts.map(h => {
+    const display   = h.name || h.ip;
+    const dotColor  = h.reachable ? "#3fb950" : "#6e7681";
+    const devBadge  = h.device_count > 0
+      ? `<span style="font-size:.65rem;color:#8b949e">(${h.device_count})</span>` : "";
+    const isActive  = currentBastionId === h.id;
+    const safeName  = display.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    return `
+      <span class="sc-pill std-bastion-pill d-inline-flex align-items-center gap-1${isActive ? ' active' : ''}"
+            data-hv-id="${h.id}" data-hv-name="${display}"
+            onclick="switchBastionTab(${h.id})">
+        <span style="width:6px;height:6px;border-radius:50%;background:${dotColor};flex-shrink:0"></span>
+        <span>${display}</span>
+        ${devBadge}
+        <span style="margin-left:2px;opacity:.45;font-size:.7rem;line-height:1" title="Remove bastion"
+              onclick="event.stopPropagation();deleteBastionHost(${h.id},'${safeName}')">✕</span>
+      </span>`;
+  }).join("");
+}
+
+function switchBastionTab(hvId) {
+  currentBastionId = hvId;
+  document.getElementById("stdPillAll").classList.toggle("active", hvId === null);
+  document.querySelectorAll(".std-bastion-pill").forEach(btn => {
+    btn.classList.toggle("active", parseInt(btn.dataset.hvId) === hvId);
+  });
+  const label = hvId === null ? "Standard Testbeds" :
+    (document.querySelector(`.std-bastion-pill[data-hv-id="${hvId}"]`)?.dataset.hvName || hvId);
+  document.getElementById("topoLabel").textContent =
+    "Standard Testbeds" + (hvId !== null ? ` — ${label}` : "");
+  refreshAll();
+}
+
+function toggleBastionAddForm() {
+  const panel = document.getElementById("bastionAddPanel");
+  panel.style.display = panel.style.display === "none" ? "" : "none";
 }
 
 async function deleteBastionHost(hvId, name) {
   if (!confirm(`Delete "${name}" and all its devices from the dashboard?`)) return;
   await fetch(`/api/bastion/${hvId}`, {method: "DELETE"});
+  if (currentBastionId === hvId) currentBastionId = null;
   loadBastionHosts();
   loadRecordingOptions();
   refreshAll();
@@ -1494,6 +1539,7 @@ async function addBastionHost() {
       document.getElementById("bastionIp").value   = "";
       document.getElementById("bastionUser").value = "";
       document.getElementById("bastionPass").value = "";
+      setTimeout(() => { document.getElementById("bastionAddPanel").style.display = "none"; }, 1500);
       loadBastionHosts();
       setTimeout(() => { loadRecordingOptions(); refreshAll(); }, 10000);
     }

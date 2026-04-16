@@ -1508,29 +1508,40 @@ def index():
 
 @app.route("/api/summary")
 def api_summary():
-    tid = request.args.get("topology", "chennai")
+    tid   = request.args.get("topology", "chennai")
+    hv_id = request.args.get("hypervisor_id", type=int)
     with get_db() as conn:
+        if hv_id:
+            hv_where  = "id=? AND topology_id=?"
+            hv_args   = (hv_id, tid)
+            dev_where = "d.hypervisor_id=? AND h.topology_id=?"
+            dev_args  = (hv_id, tid)
+        else:
+            hv_where  = "topology_id=?"
+            hv_args   = (tid,)
+            dev_where = "h.topology_id=?"
+            dev_args  = (tid,)
         hv_total = conn.execute(
-            "SELECT COUNT(*) FROM hypervisors WHERE topology_id=?", (tid,)).fetchone()[0]
-        hv_up = conn.execute(
-            "SELECT COUNT(*) FROM hypervisors WHERE topology_id=? AND reachable=1", (tid,)).fetchone()[0]
-        e_total = conn.execute("""
+            f"SELECT COUNT(*) FROM hypervisors WHERE {hv_where}", hv_args).fetchone()[0]
+        hv_up    = conn.execute(
+            f"SELECT COUNT(*) FROM hypervisors WHERE {hv_where} AND reachable=1", hv_args).fetchone()[0]
+        e_total  = conn.execute(f"""
             SELECT COUNT(*) FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
-            WHERE h.topology_id=? AND d.device_type='edge'""", (tid,)).fetchone()[0]
-        e_up = conn.execute("""
+            WHERE {dev_where} AND d.device_type='edge'""", dev_args).fetchone()[0]
+        e_up     = conn.execute(f"""
             SELECT COUNT(*) FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
-            WHERE h.topology_id=? AND d.device_type='edge' AND d.reachable=1""", (tid,)).fetchone()[0]
-        g_total = conn.execute("""
+            WHERE {dev_where} AND d.device_type='edge' AND d.reachable=1""", dev_args).fetchone()[0]
+        g_total  = conn.execute(f"""
             SELECT COUNT(*) FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
-            WHERE h.topology_id=? AND d.device_type='gateway'""", (tid,)).fetchone()[0]
-        g_up = conn.execute("""
+            WHERE {dev_where} AND d.device_type='gateway'""", dev_args).fetchone()[0]
+        g_up     = conn.execute(f"""
             SELECT COUNT(*) FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
-            WHERE h.topology_id=? AND d.device_type='gateway' AND d.reachable=1""", (tid,)).fetchone()[0]
-        samples = conn.execute("""
+            WHERE {dev_where} AND d.device_type='gateway' AND d.reachable=1""", dev_args).fetchone()[0]
+        samples  = conn.execute(f"""
             SELECT COUNT(*) FROM memory_samples ms
             JOIN devices d ON ms.device_id=d.id
             JOIN hypervisors h ON d.hypervisor_id=h.id
-            WHERE h.topology_id=?""", (tid,)).fetchone()[0]
+            WHERE {dev_where}""", dev_args).fetchone()[0]
     return jsonify({
         "hypervisors":   {"total": hv_total,  "reachable": hv_up},
         "edges":         {"total": e_total,   "reachable": e_up},
@@ -1544,17 +1555,23 @@ def api_summary():
 def api_devices():
     tid   = request.args.get("topology", "chennai")
     dtype = request.args.get("type", "")
+    hv_id = request.args.get("hypervisor_id", type=int)
     with get_db() as conn:
-        q = """
+        if hv_id:
+            dev_where = "d.hypervisor_id=? AND h.topology_id=?"
+            params = [hv_id, tid]
+        else:
+            dev_where = "h.topology_id=?"
+            params = [tid]
+        q = f"""
             SELECT d.id, d.device_type, d.ip, d.console_port, d.vm_name,
                    d.core_files, d.ha_core_files,
                    d.last_seen, d.reachable,
                    h.name AS hypervisor_name, h.ip AS hypervisor_ip
             FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
-            WHERE h.topology_id=?
+            WHERE {dev_where}
               AND NOT (d.console_port >= 2200 AND d.console_port <= 2299)
         """
-        params = [tid]
         if dtype in ("edge", "gateway"):
             q += " AND d.device_type=?"
             params.append(dtype)
@@ -1617,16 +1634,23 @@ def api_device_history(device_id):
 
 @app.route("/api/alerts")
 def api_alerts():
-    tid = request.args.get("topology", "chennai")
+    tid   = request.args.get("topology", "chennai")
+    hv_id = request.args.get("hypervisor_id", type=int)
+    if hv_id:
+        dev_where = "d.hypervisor_id=? AND h.topology_id=?"
+        dev_args  = (hv_id, tid)
+    else:
+        dev_where = "h.topology_id=?"
+        dev_args  = (tid,)
     with get_db() as conn:
-        devices = [dict(r) for r in conn.execute("""
+        devices = [dict(r) for r in conn.execute(f"""
             SELECT d.id, d.device_type, d.ip, d.vm_name, d.reachable,
                    h.name AS hypervisor_name
             FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
-            WHERE h.topology_id=?
+            WHERE {dev_where}
               AND d.reachable=1
               AND NOT (d.console_port >= 2200 AND d.console_port <= 2299)
-        """, (tid,)).fetchall()]
+        """, dev_args).fetchall()]
 
     alerts = []
     for dev in devices:
