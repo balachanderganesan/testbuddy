@@ -1382,6 +1382,9 @@ def _build_report_data(session_id):
         elif ca["alert_level"] == "warning":
             check_alert_summary[ct]["warning"] += 1
 
+    dc = session.get("device_count") or 0
+    if dc > 0:
+        session["sample_count"] = session["sample_count"] // dc
     return {
         "session":              session,
         "topology_label":       topo_label,
@@ -2007,10 +2010,11 @@ def api_recording_stop():
         )
     # Remove from in-memory poll tracker so the manager ignores it immediately
     _rec_last_polled.pop(sid, None)
+    display_sc = sc // dc if dc > 0 else sc
     return jsonify({
         "id": sid, "topology": tid, "hypervisor_id": hv_id,
         "started_at": started, "stopped_at": now,
-        "sample_count": sc, "device_count": dc, "status": status,
+        "sample_count": display_sc, "device_count": dc, "status": status,
     })
 
 
@@ -2110,6 +2114,8 @@ def api_reports():
             r["topology_label"] = r.get("hypervisor_name") or r.get("hypervisor_ip") or "Bastion"
         else:
             r["topology_label"] = TOPOLOGIES.get(r["topology_id"], {}).get("label", r["topology_id"])
+        dc = r.get("device_count") or 0
+        r["sample_count"] = r["sample_count"] // dc if dc > 0 else r["sample_count"]
     return jsonify(rows)
 
 
