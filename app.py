@@ -1365,7 +1365,20 @@ def _build_report_data(session_id):
                 cr["ts"] = cr["last_seen"]
                 check_alerts_data.append(cr)
 
-        # Build per-device check summary (latest check results within window)
+        # Build per-device check summary and trend data
+        # Query full (non-deduplicated) check history for trend charts
+        check_trend_rows = {}
+        if device_ids:
+            for row in conn.execute(f"""
+                SELECT device_id, ts, check_type, result_json, alert_level
+                FROM device_checks
+                WHERE device_id IN ({ph})
+                  AND ts >= ? AND ts <= ?
+                  AND check_type != 'memory_top10'
+                ORDER BY ts ASC
+            """, (*device_ids, start, stop)).fetchall():
+                check_trend_rows.setdefault(row["device_id"], []).append(row)
+
         for dev in result_devices:
             dev_checks = [c for c in check_alerts_data if c["device_id"] == dev["id"]]
             # Unique check types with alert for this device
@@ -1381,6 +1394,22 @@ def _build_report_data(session_id):
                         "alert_detail": c["alert_detail"],
                         "ts":          c["ts"],
                     })
+
+            # Extract numeric trend data per check type for charts
+            dev["check_trends"] = {}
+            for row in check_trend_rows.get(dev["id"], []):
+                ct = row["check_type"]
+                extractor = _TREND_EXTRACTORS.get(ct)
+                if not extractor:
+                    continue
+                try:
+                    result = json.loads(row["result_json"])
+                    metrics = extractor(result)
+                except Exception:
+                    continue
+                metrics["ts"] = row["ts"]
+                metrics["alert_level"] = row["alert_level"]
+                dev["check_trends"].setdefault(ct, []).append(metrics)
 
     # Summarize check alerts by category for the report header
     check_alert_summary = {}
@@ -1831,6 +1860,68 @@ def api_device_checks_history(device_id):
             r["result"] = None
         del r["result_json"]
     return jsonify({"check_type": check_type, "samples": rows})
+
+
+_TREND_EXTRACTORS = {
+    "tunnel": lambda r: {
+        "stable":   sum(e.get("stable", 0) or 0 for e in r) if isinstance(r, list) else 0,
+        "unstable": sum(e.get("unstable", 0) or 0 for e in r) if isinstance(r, list) else 0,
+        "dead":     sum(e.get("dead", 0) or 0 for e in r) if isinstance(r, list) else 0,
+    },
+    "route": lambda r: {
+        "total_routes": r.get("_total_routes", 0) if isinstance(r, dict) else 0,
+    },
+    "path": lambda r: {
+        "peer_count":  r.get("_total_peer_count", 0) if isinstance(r, dict) else 0,
+        "total_paths": r.get("_total_paths", 0) if isinstance(r, dict) else 0,
+    },
+    "stale_pi": lambda r: {
+        "count": r.get("count", 0) if isinstance(r, dict) else (len(r) if isinstance(r, list) else 0),
+    },
+    "stale_td": lambda r: {
+        "count": r.get("count", 0) if isinstance(r, dict) else (len(r) if isinstance(r, list) else 0),
+    },
+    "health": lambda r: {
+        "cpu_pct":      float(r.get("cpu_300s_avg_pct") or r.get("cpu_60s_avg_pct") or 0) if isinstance(r, dict) else 0,
+        "mem_pct":      float(r.get("edged_mem_usage_pct") or r.get("gatewayd_mem_usage_pct") or 0) if isinstance(r, dict) else 0,
+        "flow_count":   int(r.get("flow_count") or 0) if isinstance(r, dict) else 0,
+        "handoffq_drops": int(r.get("handoffq_drops") or 0) if isinstance(r, dict) else 0,
+    },
+    "dpdk_leak": lambda r: {
+        "leak_count": r.get("leak_count", 0) if isinstance(r, dict) else 0,
+    },
+}
+
+
+@app.route("/api/device/<int:device_id>/checks/trends")
+def api_device_checks_trends(device_id):
+    """Return pre-extracted numeric time-series for all chartable check types."""
+    hours = max(1, min(int(request.args.get("hours", 6)), 168))
+    since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT ts, check_type, result_json, alert_level
+            FROM device_checks
+            WHERE device_id = ? AND ts >= ? AND check_type != 'memory_top10'
+            ORDER BY ts ASC
+        """, (device_id, since)).fetchall()
+
+    trends = {}
+    for row in rows:
+        ct = row["check_type"]
+        extractor = _TREND_EXTRACTORS.get(ct)
+        if not extractor:
+            continue
+        try:
+            result = json.loads(row["result_json"])
+            metrics = extractor(result)
+        except Exception:
+            continue
+        metrics["ts"] = row["ts"]
+        metrics["alert_level"] = row["alert_level"]
+        trends.setdefault(ct, []).append(metrics)
+
+    return jsonify(trends)
 
 
 @app.route("/api/rediscover", methods=["POST"])

@@ -1049,20 +1049,151 @@ function renderCheckResult(type, result) {
   return '';
 }
 
-async function loadDeviceChecks(deviceId) {
+const checkCharts = {};  // track Chart.js instances for cleanup
+
+function _destroyCheckCharts() {
+  Object.values(checkCharts).forEach(c => c.destroy());
+  Object.keys(checkCharts).forEach(k => delete checkCharts[k]);
+}
+
+// Shared dark-theme chart options for small trend charts
+function _trendChartOpts(yLabel) {
+  return {
+    responsive: true, maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { labels: { color: "#8b949e", font: { size: 10 }, boxWidth: 10 } },
+      tooltip: { backgroundColor: "#1c2128", borderColor: "#30363d", borderWidth: 1,
+                 titleColor: "#c9d1d9", bodyColor: "#8b949e" },
+    },
+    scales: {
+      x: { type: "time", grid: { color: "#21262d" },
+           ticks: { color: "#8b949e", maxTicksLimit: 6, font: { size: 9 } },
+           time: { displayFormats: { minute: "HH:mm", hour: "MMM d HH:mm", day: "MMM d" } } },
+      y: { title: { display: true, text: yLabel, color: "#8b949e", font: { size: 9 } },
+           grid: { color: "#21262d" }, ticks: { color: "#8b949e", font: { size: 9 } }, min: 0 },
+    },
+  };
+}
+
+function _tsLabels(samples) {
+  return samples.map(s => new Date(s.ts.endsWith("Z") ? s.ts : s.ts + "Z"));
+}
+
+function buildTunnelTrendChart(canvasId, samples) {
+  const ctx = document.getElementById(canvasId)?.getContext("2d");
+  if (!ctx || !samples.length) return;
+  const labels = _tsLabels(samples);
+  const ptR = samples.length > 60 ? 0 : 2;
+  checkCharts[canvasId] = new Chart(ctx, {
+    type: "line", data: { labels, datasets: [
+      { label: "Stable",   data: samples.map(s => s.stable),   borderColor: "#3fb950", backgroundColor: "rgba(63,185,80,.1)", fill: true, tension: .3, pointRadius: ptR, borderWidth: 1.5 },
+      { label: "Unstable", data: samples.map(s => s.unstable), borderColor: "#d29922", backgroundColor: "rgba(210,153,34,.1)", fill: true, tension: .3, pointRadius: ptR, borderWidth: 1.5 },
+      { label: "Dead",     data: samples.map(s => s.dead),     borderColor: "#f85149", backgroundColor: "rgba(248,81,73,.1)",  fill: true, tension: .3, pointRadius: ptR, borderWidth: 1.5 },
+    ]}, options: _trendChartOpts("Tunnels"),
+  });
+}
+
+function buildRouteTrendChart(canvasId, samples) {
+  const ctx = document.getElementById(canvasId)?.getContext("2d");
+  if (!ctx || !samples.length) return;
+  const ptR = samples.length > 60 ? 0 : 2;
+  checkCharts[canvasId] = new Chart(ctx, {
+    type: "line", data: { labels: _tsLabels(samples), datasets: [
+      { label: "Total Routes", data: samples.map(s => s.total_routes), borderColor: "#1f6feb", backgroundColor: "rgba(31,111,235,.08)", fill: true, tension: .3, pointRadius: ptR, borderWidth: 2 },
+    ]}, options: _trendChartOpts("Routes"),
+  });
+}
+
+function buildPathTrendChart(canvasId, samples) {
+  const ctx = document.getElementById(canvasId)?.getContext("2d");
+  if (!ctx || !samples.length) return;
+  const ptR = samples.length > 60 ? 0 : 2;
+  checkCharts[canvasId] = new Chart(ctx, {
+    type: "line", data: { labels: _tsLabels(samples), datasets: [
+      { label: "Total Paths", data: samples.map(s => s.total_paths), borderColor: "#1f6feb", backgroundColor: "rgba(31,111,235,.08)", fill: true, tension: .3, pointRadius: ptR, borderWidth: 2 },
+      { label: "Peer Count",  data: samples.map(s => s.peer_count),  borderColor: "#a371f7", backgroundColor: "transparent", tension: .3, pointRadius: 0, borderWidth: 1.5, borderDash: [5,3] },
+    ]}, options: _trendChartOpts("Paths"),
+  });
+}
+
+function buildStaleTrendChart(canvasId, samples, label) {
+  const ctx = document.getElementById(canvasId)?.getContext("2d");
+  if (!ctx || !samples.length) return;
+  const ptR = samples.length > 60 ? 0 : 2;
+  checkCharts[canvasId] = new Chart(ctx, {
+    type: "line", data: { labels: _tsLabels(samples), datasets: [
+      { label, data: samples.map(s => s.count), borderColor: "#d29922", backgroundColor: "rgba(210,153,34,.08)", fill: true, tension: .3, pointRadius: ptR, borderWidth: 2 },
+    ]}, options: _trendChartOpts("Count"),
+  });
+}
+
+function buildHealthTrendChart(canvasId, samples) {
+  const ctx = document.getElementById(canvasId)?.getContext("2d");
+  if (!ctx || !samples.length) return;
+  const labels = _tsLabels(samples);
+  const ptR = samples.length > 60 ? 0 : 2;
+  const opts = _trendChartOpts("%");
+  // Use secondary Y axis for flow_count and handoff drops (different scale)
+  opts.scales.y2 = {
+    position: "right", title: { display: true, text: "Count", color: "#8b949e", font: { size: 9 } },
+    grid: { drawOnChartArea: false }, ticks: { color: "#8b949e", font: { size: 9 } }, min: 0,
+  };
+  checkCharts[canvasId] = new Chart(ctx, {
+    type: "line", data: { labels, datasets: [
+      { label: "CPU %",     data: samples.map(s => s.cpu_pct),  borderColor: "#f85149", backgroundColor: "transparent", tension: .3, pointRadius: ptR, borderWidth: 1.5 },
+      { label: "Mem %",     data: samples.map(s => s.mem_pct),  borderColor: "#1f6feb", backgroundColor: "transparent", tension: .3, pointRadius: ptR, borderWidth: 1.5 },
+      { label: "Flows",     data: samples.map(s => s.flow_count), borderColor: "#3fb950", backgroundColor: "transparent", tension: .3, pointRadius: 0, borderWidth: 1, borderDash: [4,3], yAxisID: "y2" },
+      { label: "HO Drops",  data: samples.map(s => s.handoffq_drops), borderColor: "#d29922", backgroundColor: "transparent", tension: .3, pointRadius: 0, borderWidth: 1, borderDash: [4,3], yAxisID: "y2" },
+    ]}, options: opts,
+  });
+}
+
+function buildDpdkTrendChart(canvasId, samples) {
+  const ctx = document.getElementById(canvasId)?.getContext("2d");
+  if (!ctx || !samples.length) return;
+  const ptR = samples.length > 60 ? 0 : 2;
+  checkCharts[canvasId] = new Chart(ctx, {
+    type: "line", data: { labels: _tsLabels(samples), datasets: [
+      { label: "Leak Count", data: samples.map(s => s.leak_count), borderColor: "#f85149", backgroundColor: "rgba(248,81,73,.08)", fill: true, tension: .3, pointRadius: ptR, borderWidth: 2 },
+    ]}, options: _trendChartOpts("Leaks"),
+  });
+}
+
+const _trendBuilders = {
+  tunnel:   (id, s) => buildTunnelTrendChart(id, s),
+  route:    (id, s) => buildRouteTrendChart(id, s),
+  path:     (id, s) => buildPathTrendChart(id, s),
+  stale_pi: (id, s) => buildStaleTrendChart(id, s, "Stale PI"),
+  stale_td: (id, s) => buildStaleTrendChart(id, s, "Stale TD"),
+  health:   (id, s) => buildHealthTrendChart(id, s),
+  dpdk_leak:(id, s) => buildDpdkTrendChart(id, s),
+};
+
+async function loadDeviceChecks(deviceId, hours) {
   if (!deviceId) return;
+  hours = hours || 6;
   const panel = document.getElementById("modalChecksPanel");
   const container = document.getElementById("modalChecksContent");
+  _destroyCheckCharts();
   try {
-    const checks = await fetch(`/api/device/${deviceId}/checks`).then(r => r.json());
+    const [checks, trends] = await Promise.all([
+      fetch(`/api/device/${deviceId}/checks`).then(r => r.json()),
+      fetch(`/api/device/${deviceId}/checks/trends?hours=${hours}`).then(r => r.json()),
+    ]);
     if (!checks.length) { panel.style.display = "none"; return; }
     panel.style.display = "block";
+
     container.innerHTML = checks.map(chk => {
       const label = CHECK_LABELS[chk.check_type] || chk.check_type;
       const badgeClass = chk.alert_level === 'critical' ? 'badge-critical'
                        : chk.alert_level === 'warning'  ? 'badge-warning' : 'badge-ok';
       const detail = chk.alert_detail || 'OK';
       const resultHtml = renderCheckResult(chk.check_type, chk.result);
+      const hasTrend = chk.check_type !== 'memory_top10' && (trends[chk.check_type]||[]).length > 1;
+      const chartHtml = hasTrend
+        ? `<div style="height:150px;margin-top:.4rem"><canvas id="trendChart_${chk.check_type}"></canvas></div>`
+        : '';
       return `<div class="col-12 col-md-6">
         <div style="background:#1c2128;border:1px solid #30363d;border-radius:8px;padding:.6rem .8rem;">
           <div class="d-flex align-items-center justify-content-between mb-1">
@@ -1071,10 +1202,20 @@ async function loadDeviceChecks(deviceId) {
           </div>
           <div style="font-size:.72rem;color:#8b949e;margin-bottom:.3rem">${detail}</div>
           ${resultHtml}
+          ${chartHtml}
           <div style="font-size:.65rem;color:#6e7681;margin-top:.25rem">${fmtTime(chk.ts)}</div>
         </div>
       </div>`;
     }).join('');
+
+    // Render trend charts after DOM is updated
+    setTimeout(() => {
+      for (const [ct, samples] of Object.entries(trends)) {
+        if (samples.length < 2) continue;
+        const builder = _trendBuilders[ct];
+        if (builder) builder(`trendChart_${ct}`, samples);
+      }
+    }, 50);
   } catch(e) {
     panel.style.display = "none";
     console.error("loadDeviceChecks:", e);
@@ -1181,7 +1322,7 @@ async function loadHistory(hours) {
   }
 
   buildChart(samples, pid, hours);
-  loadDeviceChecks(activeDeviceId);
+  loadDeviceChecks(activeDeviceId, hours);
 }
 
 function buildChart(samples, currentPid, hours) {
@@ -1764,6 +1905,7 @@ function _applyReportDetailData(data) {
   // Destroy old charts before re-rendering
   Object.values(reportCharts).forEach(c => c.destroy());
   Object.keys(reportCharts).forEach(k => delete reportCharts[k]);
+  _destroyCheckCharts();
 
   const el = document.getElementById("reportDetailContent");
 
@@ -1940,10 +2082,51 @@ function renderReportDetail(data, container) {
           <canvas id="reportChart_${dev.id}"></canvas>
         </div>
       </div>
+      ${_renderReportCheckTrends(dev)}
     </div>`;
   }).join("");
 
-  setTimeout(() => data.devices.forEach(dev => buildReportChart(dev)), 50);
+  setTimeout(() => {
+    data.devices.forEach(dev => {
+      buildReportChart(dev);
+      _buildReportCheckTrendCharts(dev);
+    });
+  }, 50);
+}
+
+function _renderReportCheckTrends(dev) {
+  const trends = dev.check_trends || {};
+  const chartable = Object.entries(trends).filter(([ct, s]) => s.length > 1);
+  if (!chartable.length) return '';
+  const trendLabels = {
+    tunnel: 'Tunnel Status', route: 'Route Summary', path: 'Path Summary',
+    stale_pi: 'Stale PI Flows', stale_td: 'Stale TD Flows',
+    health: 'Health Report', dpdk_leak: 'DPDK Leaks'
+  };
+  return `<div class="px-3 pb-3">
+    <div class="d-flex align-items-center gap-2 mb-2">
+      <i class="bi bi-shield-check text-info" style="font-size:.85rem"></i>
+      <strong style="font-size:.78rem;color:#8b949e">Diagnostic Check Trends</strong>
+    </div>
+    <div class="row g-2">
+      ${chartable.map(([ct]) => `<div class="col-12 col-md-6">
+        <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:.5rem .7rem">
+          <div style="font-size:.72rem;color:#8b949e;margin-bottom:.3rem">${trendLabels[ct] || ct}</div>
+          <div style="height:140px"><canvas id="reportTrend_${dev.id}_${ct}"></canvas></div>
+        </div>
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function _buildReportCheckTrendCharts(dev) {
+  const trends = dev.check_trends || {};
+  for (const [ct, samples] of Object.entries(trends)) {
+    if (samples.length < 2) continue;
+    const canvasId = `reportTrend_${dev.id}_${ct}`;
+    const builder = _trendBuilders[ct];
+    if (builder) builder(canvasId, samples);
+  }
 }
 
 function buildReportChart(dev) {
