@@ -1051,32 +1051,13 @@ function _populateReportFilterOptions(options) {
   if (!filter) return;
   const prev = filter.value;
   filter.innerHTML = '<option value="">All Topologies</option>';
-  // Topology-level entries (no hypervisor_id)
-  const topoOpts = options.filter(o => !o.hypervisor_id);
-  if (topoOpts.length) {
-    const og = document.createElement("optgroup");
-    og.label = "Topology";
-    topoOpts.forEach(o => {
-      const opt = document.createElement("option");
-      opt.value = o.value;
-      opt.textContent = o.label;
-      og.appendChild(opt);
-    });
-    filter.appendChild(og);
-  }
-  // Per-bastion entries (have hypervisor_id, value = "bastion_<id>")
-  const bastionOpts = options.filter(o => !!o.hypervisor_id);
-  if (bastionOpts.length) {
-    const og = document.createElement("optgroup");
-    og.label = "Standard Testbeds";
-    bastionOpts.forEach(o => {
-      const opt = document.createElement("option");
-      opt.value = o.value; // "bastion_<id>"
-      opt.textContent = o.label;
-      og.appendChild(opt);
-    });
-    filter.appendChild(og);
-  }
+  // All options (topologies + per-bastion) — flat list, value is always the topology string
+  options.forEach(o => {
+    const opt = document.createElement("option");
+    opt.value = o.value;
+    opt.textContent = o.label;
+    filter.appendChild(opt);
+  });
   // Restore previous selection if still valid
   if (prev && filter.querySelector(`option[value="${prev}"]`)) filter.value = prev;
 }
@@ -1260,12 +1241,7 @@ async function loadReports() {
   closeReportDetail();
   await loadActiveRecordings();
   const val = document.getElementById("reportTopoFilter").value;
-  let url = "/api/reports";
-  if (val.startsWith("bastion_")) {
-    url += `?hypervisor_id=${val.slice("bastion_".length)}`;
-  } else if (val) {
-    url += `?topology=${encodeURIComponent(val)}`;
-  }
+  const url = val ? `/api/reports?topology=${encodeURIComponent(val)}` : "/api/reports";
   const reports = await fetch(url).then(r => r.json());
   renderReportsList(reports);
 }

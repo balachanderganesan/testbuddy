@@ -1403,7 +1403,6 @@ def api_report_live(report_id):
 @app.route("/api/reports")
 def api_reports():
     tid = request.args.get("topology", "")
-    hid = request.args.get("hypervisor_id", "")
     with get_db() as conn:
         base = """
             SELECT rs.*, h.name AS hypervisor_name, h.ip AS hypervisor_ip
@@ -1411,9 +1410,11 @@ def api_reports():
             LEFT JOIN hypervisors h ON rs.hypervisor_id = h.id
             WHERE rs.status != 'recording'
         """
-        if hid:
+        if tid.startswith("bastion_"):
+            # Per-bastion topology value — filter by hypervisor_id
+            hid = int(tid[len("bastion_"):])
             rows = [dict(r) for r in conn.execute(
-                base + " AND rs.hypervisor_id=? ORDER BY rs.started_at DESC", (int(hid),)
+                base + " AND rs.hypervisor_id=? ORDER BY rs.started_at DESC", (hid,)
             ).fetchall()]
         elif tid:
             rows = [dict(r) for r in conn.execute(
