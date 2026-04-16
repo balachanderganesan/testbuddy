@@ -169,7 +169,7 @@
         {% for f in a.core_files %}
           <div><code>{{ f.name }}</code>
             {% if f.file_ts %}
-              <span class="text-muted">({{ f.file_ts|int }})</span>
+              <span class="text-muted">({{ f.file_ts_str or f.file_ts|int }})</span>
             {% endif %}
           </div>
         {% endfor %}
@@ -180,7 +180,7 @@
         {% for f in a.ha_core_files %}
           <div><code>[HA] {{ f.name }}</code>
             {% if f.file_ts %}
-              <span class="text-muted">({{ f.file_ts|int }})</span>
+              <span class="text-muted">({{ f.file_ts_str or f.file_ts|int }})</span>
             {% endif %}
           </div>
         {% endfor %}

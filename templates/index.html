@@ -1045,7 +1045,7 @@ function renderCheckResult(type, result) {
     if (type === 'dpdk_leak') {
       return `<div style="font-size:.72rem">Leak count: <strong>${result.leak_count ?? 0}</strong></div>`;
     }
-  } catch(e) {}
+  } catch(e) { console.warn("renderCheckResult error:", type, e); }
   return '';
 }
 

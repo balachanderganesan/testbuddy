@@ -819,6 +819,14 @@ def _parse_stale_check(block, device, kind):
     }
 
 
+_ALERT_RANK = {"ok": 0, "warning": 1, "critical": 2}
+
+
+def _escalate_level(current, new):
+    """Return whichever alert level is more severe."""
+    return new if _ALERT_RANK.get(new, 0) > _ALERT_RANK.get(current, 0) else current
+
+
 def _parse_health_check(block, device):
     """Parse health report and alert on CPU/mem/handoff thresholds."""
     data = _safe_json(block, {})
@@ -840,10 +848,10 @@ def _parse_health_check(block, device):
             cpu_300 = None
     if cpu_300 is not None:
         if cpu_300 > 95:
-            level = "critical"
+            level = _escalate_level(level, "critical")
             details.append(f"CPU 300s avg {cpu_300:.1f}%")
         elif cpu_300 > 80:
-            level = max(level, "warning", key=lambda x: ["ok", "warning", "critical"].index(x))
+            level = _escalate_level(level, "warning")
             details.append(f"CPU 300s avg {cpu_300:.1f}%")
 
     mem_pct = data.get("edged_mem_usage_pct") or data.get("gatewayd_mem_usage_pct")
@@ -853,7 +861,7 @@ def _parse_health_check(block, device):
         except (TypeError, ValueError):
             mem_pct = None
     if mem_pct is not None and mem_pct > 85:
-        level = max(level, "warning", key=lambda x: ["ok", "warning", "critical"].index(x))
+        level = _escalate_level(level, "warning")
         details.append(f"mem usage {mem_pct:.1f}%")
 
     drops = data.get("handoffq_drops")
@@ -863,7 +871,7 @@ def _parse_health_check(block, device):
         except (TypeError, ValueError):
             drops = 0
     if drops and drops > 0:
-        level = max(level, "warning", key=lambda x: ["ok", "warning", "critical"].index(x))
+        level = _escalate_level(level, "warning")
         details.append(f"handoff drops {drops}")
 
     return {
@@ -1282,9 +1290,11 @@ def _build_report_data(session_id):
                 for f in (files if isinstance(files, list) else []):
                     fname = f.get("name", "")
                     if fname and fname not in seen_files:
+                        ts_val = f.get("ts", 0)
                         seen_files[fname] = {
                             "name": fname,
-                            "file_ts": f.get("ts", 0),
+                            "file_ts": ts_val,
+                            "file_ts_str": datetime.utcfromtimestamp(int(ts_val)).strftime("%Y-%m-%d %H:%M:%S") if ts_val else "",
                             "first_poll": s["ts"],
                         }
             # Same for HA core files
@@ -1300,9 +1310,11 @@ def _build_report_data(session_id):
                 for f in (files if isinstance(files, list) else []):
                     fname = f.get("name", "")
                     if fname and fname not in ha_seen_files:
+                        ts_val = f.get("ts", 0)
                         ha_seen_files[fname] = {
                             "name": fname,
-                            "file_ts": f.get("ts", 0),
+                            "file_ts": ts_val,
+                            "file_ts_str": datetime.utcfromtimestamp(int(ts_val)).strftime("%Y-%m-%d %H:%M:%S") if ts_val else "",
                             "first_poll": s["ts"],
                         }
 
@@ -1582,18 +1594,30 @@ def api_devices():
         dev["core_files"]    = json.loads(dev.get("core_files")    or "[]")
         dev["ha_core_files"] = json.loads(dev.get("ha_core_files") or "[]")
         dev["memory"] = get_device_status(dev["id"])
-        # Latest diagnostic check status summary
+
+    # Batch-fetch latest check_type → alert_level for all devices in one query
+    if rows:
+        device_ids = [d["id"] for d in rows]
+        ph = ",".join("?" * len(device_ids))
         with get_db() as conn:
-            chk_rows = conn.execute("""
-                SELECT check_type, alert_level
+            chk_rows = conn.execute(f"""
+                SELECT dc.device_id, dc.check_type, dc.alert_level
                 FROM device_checks dc
-                WHERE dc.device_id = ?
+                WHERE dc.device_id IN ({ph})
                   AND dc.ts = (
                       SELECT MAX(dc2.ts) FROM device_checks dc2
                       WHERE dc2.device_id = dc.device_id AND dc2.check_type = dc.check_type
                   )
-            """, (dev["id"],)).fetchall()
-        dev["checks_summary"] = {r["check_type"]: r["alert_level"] for r in chk_rows}
+            """, device_ids).fetchall()
+        checks_by_device = {}
+        for r in chk_rows:
+            checks_by_device.setdefault(r["device_id"], {})[r["check_type"]] = r["alert_level"]
+        for dev in rows:
+            dev["checks_summary"] = checks_by_device.get(dev["id"], {})
+    else:
+        for dev in rows:
+            dev["checks_summary"] = {}
+
     return jsonify(rows)
 
 
@@ -1758,7 +1782,7 @@ def api_checks_dismiss():
                       WHERE h.topology_id = ?
                   )
             """, (tid,))
-            return jsonify({"status": "dismissed_all", "topology": tid})
+            return jsonify({"status": "dismissed_all", "topology": tid, "count": result.rowcount})
         else:
             return jsonify({"error": "provide 'ids' array or 'topology'"}), 400
 
