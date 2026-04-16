@@ -440,12 +440,12 @@ const TOPO_LABELS = {
 };
 
 function switchMainTab(which) {
-  // Stop any live-report auto-refresh timer when leaving the reports tab
-  if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
-
   const isSC       = which === "sc";
   const isStandard = which === "standard";
   const isReports  = which === "reports";
+
+  // Stop live-report auto-refresh timer when leaving the reports tab
+  if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
 
   document.getElementById("mainTabChennai").classList.toggle("active", which === "chennai");
   document.getElementById("mainTabSC").classList.toggle("active", isSC);
@@ -1006,7 +1006,10 @@ async function triggerPollNow() {
 
 async function loadRecordingOptions() {
   const sel = document.getElementById("recTopoSelect");
-  const options = await fetch("/api/recording/options").then(r => r.json()).catch(() => []);
+  const [options, activeRecs] = await Promise.all([
+    fetch("/api/recording/options").then(r => r.json()).catch(() => []),
+    fetch("/api/recording/active").then(r => r.json()).catch(() => []),
+  ]);
   sel.innerHTML = "";
   // Group by "group" field
   const groups = {};
@@ -1024,9 +1027,19 @@ async function loadRecordingOptions() {
     });
     sel.appendChild(og);
   });
-  // Default to current topology tab if possible
-  const cur = currentTopology.startsWith("sc_") || currentTopology === "chennai" ? currentTopology : null;
-  if (cur) sel.value = cur;
+  // If a recording is already active (e.g. after page refresh), select its topology
+  // so the Stop button is correctly shown
+  if (activeRecs.length) {
+    const first = activeRecs[0];
+    const topoVal = first.hypervisor_id ? `bastion_${first.hypervisor_id}` : first.topology_id;
+    if (sel.querySelector(`option[value="${topoVal}"]`)) {
+      sel.value = topoVal;
+    }
+  } else {
+    // Default to current topology tab if possible
+    const cur = currentTopology.startsWith("sc_") || currentTopology === "chennai" ? currentTopology : null;
+    if (cur && sel.querySelector(`option[value="${cur}"]`)) sel.value = cur;
+  }
   onRecTopoChange();
 
   // Populate the reports filter dropdown with the same topology-level options
@@ -1221,6 +1234,15 @@ async function addBastionHost() {
 // ── Reports tab ───────────────────────────────────────────────────────────────
 let _liveRefreshTimer = null;
 
+// Persistent elapsed-time ticker — always running, zero cost when no recordings active
+const _activeRecStartTimes = {}; // session_id -> normalized ISO string
+setInterval(() => {
+  Object.entries(_activeRecStartTimes).forEach(([id, startedAt]) => {
+    const el = document.getElementById(`rec-elapsed-${id}`);
+    if (el) el.textContent = _recElapsed(startedAt) + " elapsed";
+  });
+}, 1000);
+
 async function loadReports() {
   closeReportDetail();
   await loadActiveRecordings();
@@ -1234,14 +1256,21 @@ async function loadActiveRecordings() {
   const active = await fetch("/api/recording/active").then(r => r.json()).catch(() => []);
   const sec  = document.getElementById("activeRecordingsSection");
   const list = document.getElementById("activeRecordingsList");
+  // Keep _activeRecStartTimes in sync — clear entries not in latest response
+  const activeIds = new Set(active.map(r => String(r.id)));
+  Object.keys(_activeRecStartTimes).forEach(k => { if (!activeIds.has(k)) delete _activeRecStartTimes[k]; });
   if (!active.length) {
     sec.style.display = "none";
     list.innerHTML = "";
     return;
   }
+  // Register start times for the persistent ticker
+  active.forEach(r => {
+    _activeRecStartTimes[r.id] = r.started_at.endsWith("Z") ? r.started_at : r.started_at + "Z";
+  });
   sec.style.display = "block";
   list.innerHTML = active.map(r => {
-    const dur  = _recElapsed(r.started_at);
+    const startedAt = _activeRecStartTimes[r.id];
     const intv = r.poll_interval_sec < 60 ? `${r.poll_interval_sec}s` : `${r.poll_interval_sec/60}min`;
     const lbl  = r.label ? `<strong class="me-1">${r.label}</strong>` : "";
     return `
@@ -1250,7 +1279,7 @@ async function loadActiveRecordings() {
         <span class="rec-dot"></span>
         ${lbl}<span class="fw-semibold">${r.display_label}</span>
         <span class="text-muted" style="font-size:.75rem">
-          <i class="bi bi-clock me-1"></i>${dur} elapsed
+          <i class="bi bi-clock me-1"></i><span id="rec-elapsed-${r.id}">${_recElapsed(startedAt)} elapsed</span>
           &nbsp;·&nbsp;<i class="bi bi-stopwatch me-1"></i>every ${intv}
         </span>
         <span class="ms-auto badge badge-ok" style="font-size:.65rem">LIVE</span>
@@ -1281,6 +1310,7 @@ function renderReportsList(reports) {
       : '<span class="badge badge-no_data" style="font-size:.65rem">EMPTY</span>';
     const labelHtml = r.label
       ? `<strong class="me-1">${r.label}</strong>` : "";
+    const escapedLabel = (r.label || "").replace(/'/g, "\\'");
     return `
     <div class="report-card" onclick="openReportDetail(${r.id})">
       <div class="d-flex align-items-start justify-content-between gap-2 flex-wrap">
@@ -1295,7 +1325,7 @@ function renderReportsList(reports) {
             <span class="ms-2"><i class="bi bi-clock me-1"></i>${dur}</span>
           </div>
         </div>
-        <div class="d-flex align-items-center gap-3">
+        <div class="d-flex align-items-center gap-2">
           <div class="text-center">
             <div style="font-size:1rem;font-weight:700;color:#58a6ff">${r.sample_count}</div>
             <div style="font-size:.65rem;color:#8b949e">samples</div>
@@ -1308,10 +1338,40 @@ function renderReportsList(reports) {
              onclick="event.stopPropagation()" title="Download standalone HTML report">
             <i class="bi bi-download"></i>
           </a>
+          <button class="btn btn-sm btn-outline-secondary" title="Rename"
+                  onclick="event.stopPropagation(); renameReport(${r.id}, '${escapedLabel}')">
+            <i class="bi bi-pencil"></i>
+          </button>
+          <button class="btn btn-sm btn-outline-danger" title="Delete"
+                  onclick="event.stopPropagation(); deleteReport(${r.id})">
+            <i class="bi bi-trash"></i>
+          </button>
         </div>
       </div>
     </div>`;
   }).join("");
+}
+
+async function renameReport(id, currentLabel) {
+  const newLabel = prompt("Rename report:", currentLabel);
+  if (newLabel === null) return; // cancelled
+  const r = await fetch(`/api/reports/${id}/rename`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({label: newLabel.trim()}),
+  }).then(r => r.json()).catch(() => ({}));
+  if (r.error) { toast(`Error: ${r.error}`); return; }
+  toast("Report renamed");
+  loadReports();
+}
+
+async function deleteReport(id) {
+  if (!confirm("Delete this report? This cannot be undone.")) return;
+  const r = await fetch(`/api/reports/${id}`, {method: "DELETE"})
+    .then(r => r.json()).catch(() => ({}));
+  if (r.error) { toast(`Error: ${r.error}`); return; }
+  toast("Report deleted");
+  loadReports();
 }
 
 function fmtDuration(sec) {

@@ -1464,6 +1464,33 @@ def api_report_download(report_id):
     )
 
 
+@app.route("/api/reports/<int:report_id>/rename", methods=["POST"])
+def api_report_rename(report_id):
+    label = (request.json or {}).get("label", "").strip()
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE recording_sessions SET label=? WHERE id=? AND status != 'recording'",
+            (label, report_id),
+        )
+        if cur.rowcount == 0:
+            return jsonify({"error": "not found or still recording"}), 404
+        conn.commit()
+    return jsonify({"ok": True, "label": label})
+
+
+@app.route("/api/reports/<int:report_id>", methods=["DELETE"])
+def api_report_delete(report_id):
+    with get_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM recording_sessions WHERE id=? AND status != 'recording'",
+            (report_id,),
+        )
+        if cur.rowcount == 0:
+            return jsonify({"error": "not found or still recording"}), 404
+        conn.commit()
+    return jsonify({"ok": True})
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
