@@ -1,0 +1,1630 @@
+[
+    {
+        "name": "SRV1",
+        "server_id": 1,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.201",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "120-130,101,111,112,113,114,115-117,120-125,1120-1135, 1140-1155, 1160-1175, 1180-1195",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV2",
+        "server_id": 2,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.202",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "130-140,102,111,112,113,114,115-117,120-125,1120-1135, 1140-1155, 1160-1175, 1180-1195",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV3",
+        "server_id": 3,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.204",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eth0",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eth1",
+                "l2_vlans": "140-150,103,111,112,113,114,115-117,120-125,1120-1135, 1140-1155, 1160-1175, 1180-1195",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV4",
+        "server_id": 4,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.205",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eth0",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eth1",
+                "l2_vlans": "150-160,104,111,112,113,114,115-117,120-125,1120-1135, 1140-1155, 1160-1175, 1180-1195",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV5",
+        "server_id": 5,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.206",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eth0",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eth1",
+                "l2_vlans": "160-170,105,111,112,113,114,115-117,120-125,1120-1135, 1140-1155, 1160-1175, 1180-1195",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV6",
+        "server_id": 6,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.208",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "220-230,201,211,212,213,214,215-217,220-225,1220-1235,1240-1255,1260-1275,1280-1295",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV7",
+        "server_id": 7,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.209",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "230-240,201,211,212,213,214,215-217,220-225,1220-1235,1240-1255,1260-1275,1280-1295",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV8",
+        "server_id": 8,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.211",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno2",
+                "l2_vlans": "240-250,201,211,212,213,214,215-217,220-225,1220-1235,1240-1255,1260-1275,1280-1295",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV9",
+        "server_id": 9,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.214",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "250-260,201,211,212,213,214,215-217,220-225,1220-1235,1240-1255,1260-1275,1280-1295",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV10",
+        "server_id": 10,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.215",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "260-270,201,211,212,213,214,215-217,220-225,1220-1235,1240-1255,1260-1275,1280-1295",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV11",
+        "server_id": 11,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.213",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": "320-330,301,311,312,313,314,315-317,320-325",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV12",
+        "server_id": 12,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.207",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": "330-340,301,311,312,313,314,315-317,320-325",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV13",
+        "server_id": 13,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.210",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno3",
+                "l2_vlans": "330-340,301,311,312,313,314,315-317,320-325",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+
+            }
+
+        ]
+    },
+    {
+        "name": "SRV14",
+        "server_id": 14,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.221",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "420-430,401,411,412,413,414,415-417,420-425",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV15",
+        "server_id": 15,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.223",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "430-440,402,411,412,413,414,415-417,420-425",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV16",
+        "server_id": 16,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.225",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "430-440,402,411,412,413,414,415-417,420-425",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV17",
+        "server_id": 17,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.226",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "450-460,404,411,412,413,414,415-417,420-425",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV18",
+        "server_id": 18,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.227",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "460-470,405,411,412,413,414,415-417,420-425",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+
+    {
+        "name": "SRV19",
+        "server_id": 19,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.228",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "520-530,501,511,512,513,514,515-517,520-525",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV20",
+        "server_id": 20,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.229",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "530-540,502,511,512,513,514,515-517,520-525",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV21",
+        "server_id": 21,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.243",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "enp152s0f1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "enp152s0f1",
+                "l2_vlans": "530-540,502,511,512,513,514,515-517,520-525",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV22",
+        "server_id": 22,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.244",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": "550-560,504,511,512,513,514,515-517,520-525",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV23",
+        "server_id": 23,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.245",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": "560-570,505,511,512,513,514,515-517,520-525",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+
+    {
+        "name": "SRV24",
+        "server_id": 24,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.246",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "enp152s0f1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "enp152s0f1",
+                "l2_vlans": "620-630,601,611,612,613,614,615-617,620-625",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV25",
+        "server_id": 25,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.247",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": "630-640,602,611,612,613,614,615-617,620-625",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV26",
+        "server_id": 26,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.248",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": "630-640,602,611,612,613,614,615-617,620-625",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV27",
+        "server_id": 27,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.249",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,
+                        82,84,88,90,92,94,96,98,100,102
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79,81,
+                        83,85,87,89,91,93,95,97,99,101,103
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eth5",
+                "l2_vlans": "650-660,604,611,612,613,614,615-617,620-625",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    },
+    {
+        "name": "SRV28",
+        "server_id": 28,
+        "device_type": "KVM",
+        "storage_disk": "/images",
+        "connections": {
+            "ip": "172.29.228.252",
+            "port": 22,
+            "api_port": 16509
+        },
+        "custom_params": {
+           "cpu_list": [
+               {
+                    "numa_node":  "node0",
+                    "exclude_cpus": [0],
+                    "available_cpus": [
+                        2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,
+                        40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78
+                    ]
+                },
+                {
+                    "numa_node":  "node1",
+                    "exclude_cpus": [1],
+                    "available_cpus": [
+                        3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,
+                        41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,79
+                    ]
+                }
+            ]
+        },
+        "credentials": {
+            "username": "root",
+            "password": "N#1sdwan"
+        },
+        "interfaces": [
+            {
+                "name": "br0",
+                "type": "management"
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": [],
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            },
+            {
+                "name": "eno1",
+                "l2_vlans": "660-670,605,611,612,613,614,615-617,620-625",
+                "driver": {
+                    "name": "sriov",
+                    "vf_count": 8
+                }
+            }
+        ]
+    }
+]
