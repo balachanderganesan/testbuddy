@@ -175,6 +175,20 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_rs_topology
                 ON recording_sessions(topology_id, started_at DESC);
+
+            CREATE TABLE IF NOT EXISTS device_checks (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id    INTEGER NOT NULL,
+                ts           TEXT    NOT NULL,
+                check_type   TEXT    NOT NULL,
+                result_json  TEXT    NOT NULL,
+                alert_level  TEXT    DEFAULT 'ok',
+                alert_detail TEXT,
+                FOREIGN KEY(device_id) REFERENCES devices(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_dc_dev_type_ts
+                ON device_checks(device_id, check_type, ts DESC);
         """)
         # Migrate existing DB: add new columns if absent
         _add_col_if_missing(conn, "recording_sessions", "poll_interval_sec INTEGER DEFAULT 300")
@@ -184,7 +198,15 @@ def init_db():
         _add_col_if_missing(conn, "devices", "core_files TEXT")
         _add_col_if_missing(conn, "devices", "ha_core_files TEXT")
         _add_col_if_missing(conn, "devices", "vm_port INTEGER DEFAULT 22")
+        _add_col_if_missing(conn, "devices", "prev_route_total INTEGER")
+        _add_col_if_missing(conn, "devices", "prev_peer_count INTEGER")
+        _add_col_if_missing(conn, "devices", "prev_total_paths INTEGER")
+        _add_col_if_missing(conn, "devices", "prev_stale_pi_count INTEGER")
+        _add_col_if_missing(conn, "devices", "prev_stale_td_count INTEGER")
         _add_col_if_missing(conn, "hypervisors", "topology_id TEXT DEFAULT 'chennai'")
+        _add_col_if_missing(conn, "device_checks", "dismissed INTEGER DEFAULT 0")
+        _add_col_if_missing(conn, "memory_samples", "core_files_json TEXT")
+        _add_col_if_missing(conn, "memory_samples", "ha_core_files_json TEXT")
         for col in [
             "cpu_pct REAL", "process_uptime_sec INTEGER", "core_count INTEGER",
             "ha_reachable INTEGER", "ha_pid INTEGER",
@@ -217,10 +239,15 @@ def get_db():
         conn.close()
 
 
+CHECKS_RETENTION_HOURS = 120  # 5 days for diagnostic check alerts
+
+
 def purge_old_samples():
     cutoff = (datetime.utcnow() - timedelta(hours=DB_RETENTION_HOURS)).isoformat()
+    checks_cutoff = (datetime.utcnow() - timedelta(hours=CHECKS_RETENTION_HOURS)).isoformat()
     with get_db() as conn:
         conn.execute("DELETE FROM memory_samples WHERE ts < ?", (cutoff,))
+        conn.execute("DELETE FROM device_checks WHERE ts < ?", (checks_cutoff,))
     log.info("Old samples purged")
 
 
@@ -610,6 +637,306 @@ def _collect_ha_metrics(ssh):
     return m if m["mem_total"] else None
 
 
+# ── Diagnostic checks ────────────────────────────────────────────────────────
+
+CHECKS_SSH_TIMEOUT = 120  # headroom for debug.py --timeout 60 commands
+
+
+def _checks_cmd():
+    """
+    Shell command that runs all diagnostic checks in a single SSH exec.
+    Each section is delimited by VCCHECK_<TYPE>_BEGIN / VCCHECK_<TYPE>_END.
+    The --psummary output is shared by tunnel and path checks (run once).
+    """
+    return (
+        "printf 'VCCHECK_PSUMMARY_BEGIN\\n'; "
+        "/opt/vc/bin/debug.py -v --psummary 2>/dev/null || echo '[]'; "
+        "printf '\\nVCCHECK_PSUMMARY_END\\n'; "
+
+        "printf 'VCCHECK_ROUTE_BEGIN\\n'; "
+        "/opt/vc/bin/debug.py --timeout 60 --rsummary 2>/dev/null || echo '[]'; "
+        "printf '\\nVCCHECK_ROUTE_END\\n'; "
+
+        "printf 'VCCHECK_STALE_PI_BEGIN\\n'; "
+        "/opt/vc/bin/debug.py --timeout 60 -v --stale_pi_dump 2>/dev/null || echo '[]'; "
+        "printf '\\nVCCHECK_STALE_PI_END\\n'; "
+
+        "printf 'VCCHECK_STALE_TD_BEGIN\\n'; "
+        "/opt/vc/bin/debug.py --timeout 60 -v --stale_td_dump 2>/dev/null || echo '[]'; "
+        "printf '\\nVCCHECK_STALE_TD_END\\n'; "
+
+        "printf 'VCCHECK_HEALTH_BEGIN\\n'; "
+        "/opt/vc/bin/debug.py -v --health_report 2>/dev/null || echo '{}'; "
+        "printf '\\nVCCHECK_HEALTH_END\\n'; "
+
+        "printf 'VCCHECK_MEMTOP_BEGIN\\n'; "
+        "/opt/vc/bin/debug.py -v --memory_dump 2>/dev/null || echo '[]'; "
+        "printf '\\nVCCHECK_MEMTOP_END\\n'; "
+
+        "printf 'VCCHECK_DPDK_BEGIN\\n'; "
+        "/opt/vc/bin/vcdbgdump -r dpdk-leak-dump 2>/dev/null || echo ''; "
+        "printf '\\nVCCHECK_DPDK_END\\n'"
+    )
+
+
+def _extract_check_block(raw, name):
+    """Extract text between VCCHECK_<name>_BEGIN and VCCHECK_<name>_END."""
+    begin = f"VCCHECK_{name}_BEGIN"
+    end = f"VCCHECK_{name}_END"
+    start = raw.find(begin)
+    if start < 0:
+        return None
+    start += len(begin)
+    stop = raw.find(end, start)
+    if stop < 0:
+        return None
+    return raw[start:stop].strip()
+
+
+def _safe_json(text, fallback=None):
+    """Parse JSON, returning fallback on failure."""
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return fallback
+
+
+def _parse_tunnel_check(block, device):
+    """Check tunnel stability from --psummary output."""
+    data = _safe_json(block, [])
+    if not data:
+        return None
+    total_unstable = 0
+    total_dead = 0
+    details = []
+    for entry in data:
+        unstable = entry.get("unstable", 0) or 0
+        dead = entry.get("dead", 0) or 0
+        total_unstable += unstable
+        total_dead += dead
+        if unstable or dead:
+            pt = entry.get("peer_type", "?")
+            parts = []
+            if dead:
+                parts.append(f"{dead} dead")
+            if unstable:
+                parts.append(f"{unstable} unstable")
+            details.append(f"{pt}: {', '.join(parts)}")
+
+    if total_dead > 0:
+        level = "critical"
+    elif total_unstable > 0:
+        level = "warning"
+    else:
+        level = "ok"
+
+    return {
+        "check_type": "tunnel",
+        "result": data,
+        "alert_level": level,
+        "alert_detail": "; ".join(details) if details else None,
+    }
+
+
+def _parse_route_check(block, device):
+    """Check route summary for >2% change from previous poll."""
+    data = _safe_json(block, [])
+    if not data:
+        return None
+    total_routes = 0
+    for seg in data:
+        rs = seg.get("rsummary", {})
+        if isinstance(rs, dict):
+            total_routes += rs.get("total_routes", 0) or 0
+        elif isinstance(rs, list):
+            total_routes += sum(r.get("total", 0) or 0 for r in rs)
+
+    prev = device.get("prev_route_total")
+    level = "ok"
+    detail = None
+    if prev is not None and prev > 0:
+        change_pct = abs(total_routes - prev) / prev * 100
+        if change_pct > 2.0:
+            level = "warning"
+            direction = "increased" if total_routes > prev else "decreased"
+            detail = f"Routes {direction} from {prev} to {total_routes} ({change_pct:.1f}%)"
+
+    result = {"segments": data, "_total_routes": total_routes, "_prev_total": prev}
+    return {
+        "check_type": "route",
+        "result": result,
+        "alert_level": level,
+        "alert_detail": detail,
+    }
+
+
+def _parse_path_check(block, device):
+    """Check path summary for peer/path count changes."""
+    data = _safe_json(block, [])
+    if not data:
+        return None
+    total_peers = sum(e.get("peer_count", 0) or 0 for e in data)
+    total_paths = sum(e.get("total_paths", 0) or 0 for e in data)
+
+    prev_peers = device.get("prev_peer_count")
+    prev_paths = device.get("prev_total_paths")
+    level = "ok"
+    details = []
+    if prev_peers is not None and total_peers != prev_peers:
+        level = "warning"
+        details.append(f"peer_count {prev_peers} -> {total_peers}")
+    if prev_paths is not None and total_paths != prev_paths:
+        level = "warning"
+        details.append(f"total_paths {prev_paths} -> {total_paths}")
+
+    result = {"peers": data, "_total_peer_count": total_peers, "_total_paths": total_paths}
+    return {
+        "check_type": "path",
+        "result": result,
+        "alert_level": level,
+        "alert_detail": "; ".join(details) if details else None,
+    }
+
+
+def _parse_stale_check(block, device, kind):
+    """Check stale PI or TD flow count for increases."""
+    data = _safe_json(block, [])
+    count = len(data) if isinstance(data, list) else 0
+    prev_key = f"prev_{kind}_count"
+    prev = device.get(prev_key)
+    level = "ok"
+    detail = None
+    if prev is not None and count > prev:
+        level = "warning"
+        detail = f"{kind} increased from {prev} to {count}"
+
+    truncated = data[:20] if isinstance(data, list) else []
+    return {
+        "check_type": kind,
+        "result": {"count": count, "entries": truncated},
+        "alert_level": level,
+        "alert_detail": detail,
+    }
+
+
+def _parse_health_check(block, device):
+    """Parse health report and alert on CPU/mem/handoff thresholds."""
+    data = _safe_json(block, {})
+    if not data:
+        return None
+
+    # Normalize: health_report may return a list with one dict or a plain dict
+    if isinstance(data, list):
+        data = data[0] if data else {}
+
+    level = "ok"
+    details = []
+
+    cpu_300 = data.get("cpu_300s_avg_pct")
+    if cpu_300 is not None:
+        try:
+            cpu_300 = float(cpu_300)
+        except (TypeError, ValueError):
+            cpu_300 = None
+    if cpu_300 is not None:
+        if cpu_300 > 95:
+            level = "critical"
+            details.append(f"CPU 300s avg {cpu_300:.1f}%")
+        elif cpu_300 > 80:
+            level = max(level, "warning", key=lambda x: ["ok", "warning", "critical"].index(x))
+            details.append(f"CPU 300s avg {cpu_300:.1f}%")
+
+    mem_pct = data.get("edged_mem_usage_pct") or data.get("gatewayd_mem_usage_pct")
+    if mem_pct is not None:
+        try:
+            mem_pct = float(mem_pct)
+        except (TypeError, ValueError):
+            mem_pct = None
+    if mem_pct is not None and mem_pct > 85:
+        level = max(level, "warning", key=lambda x: ["ok", "warning", "critical"].index(x))
+        details.append(f"mem usage {mem_pct:.1f}%")
+
+    drops = data.get("handoffq_drops")
+    if drops is not None:
+        try:
+            drops = int(drops)
+        except (TypeError, ValueError):
+            drops = 0
+    if drops and drops > 0:
+        level = max(level, "warning", key=lambda x: ["ok", "warning", "critical"].index(x))
+        details.append(f"handoff drops {drops}")
+
+    return {
+        "check_type": "health",
+        "result": data,
+        "alert_level": level,
+        "alert_detail": "; ".join(details) if details else None,
+    }
+
+
+def _parse_memtop_check(block, device):
+    """Parse memory dump, return top 10 allocators by bytes."""
+    data = _safe_json(block, [])
+    if not isinstance(data, list):
+        return None
+    sorted_data = sorted(data, key=lambda x: x.get("bytes", 0), reverse=True)[:10]
+    return {
+        "check_type": "memory_top10",
+        "result": sorted_data,
+        "alert_level": "ok",
+        "alert_detail": None,
+    }
+
+
+def _parse_dpdk_check(block, device):
+    """Count dpdk_mbuf_leak occurrences in vcdbgdump output."""
+    leak_count = block.count("dpdk_mbuf_leak") if block else 0
+    if leak_count > 10:
+        level = "critical"
+    elif leak_count > 0:
+        level = "warning"
+    else:
+        level = "ok"
+
+    return {
+        "check_type": "dpdk_leak",
+        "result": {"leak_count": leak_count, "raw_snippet": (block or "")[:500]},
+        "alert_level": level,
+        "alert_detail": f"{leak_count} DPDK mbuf leaks detected" if leak_count > 0 else None,
+    }
+
+
+def _parse_checks(raw, device):
+    """
+    Parse all diagnostic check blocks from the combined SSH output.
+    Each parser is independent — if one fails, the others still succeed.
+    """
+    if not raw:
+        return []
+
+    psummary_block = _extract_check_block(raw, "PSUMMARY")
+
+    results = []
+    checks = [
+        ("tunnel",      lambda: _parse_tunnel_check(psummary_block, device)),
+        ("path",        lambda: _parse_path_check(psummary_block, device)),
+        ("route",       lambda: _parse_route_check(_extract_check_block(raw, "ROUTE"), device)),
+        ("stale_pi",    lambda: _parse_stale_check(_extract_check_block(raw, "STALE_PI"), device, "stale_pi")),
+        ("stale_td",    lambda: _parse_stale_check(_extract_check_block(raw, "STALE_TD"), device, "stale_td")),
+        ("health",      lambda: _parse_health_check(_extract_check_block(raw, "HEALTH"), device)),
+        ("memory_top10", lambda: _parse_memtop_check(_extract_check_block(raw, "MEMTOP"), device)),
+        ("dpdk_leak",   lambda: _parse_dpdk_check(_extract_check_block(raw, "DPDK"), device)),
+    ]
+    for name, parse_fn in checks:
+        try:
+            result = parse_fn()
+            if result:
+                results.append(result)
+        except Exception as exc:
+            log.debug(f"  check parse error [{name}]: {exc}")
+    return results
+
+
 # ── Polling ───────────────────────────────────────────────────────────────────
 
 def poll_device(device):
@@ -638,6 +965,14 @@ def poll_device(device):
             except Exception as exc:
                 log.debug(f"  HA probe {device['ip']}: {exc}")
 
+        # Diagnostic checks (tunnel, route, path, stale flows, health, mem top10, dpdk)
+        checks = []
+        try:
+            checks_raw = ssh_run(ssh, _checks_cmd(), timeout=CHECKS_SSH_TIMEOUT)
+            checks = _parse_checks(checks_raw, device)
+        except Exception as exc:
+            log.debug(f"  checks {device['ip']}: {exc}")
+
         ssh.close()
 
         now = datetime.utcnow().isoformat()
@@ -657,15 +992,18 @@ def poll_device(device):
                     mem_total_kb, mem_free_kb, mem_available_kb,
                     mem_buffers_kb, mem_cached_kb,
                     cpu_pct, process_uptime_sec, core_count,
+                    core_files_json, ha_core_files_json,
                     ha_reachable, ha_pid,
                     ha_mem_total_kb, ha_mem_free_kb, ha_mem_available_kb,
                     ha_cpu_pct, ha_process_uptime_sec, ha_core_count
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 device["id"], now, m["pid"],
                 m["mem_total"], m["mem_free"], m["mem_available"],
                 m["mem_buffers"], m["mem_cached"],
                 m["cpu_pct"], m["process_uptime_sec"], m["core_count"],
+                json.dumps(m["core_files"]) if m["core_files"] else None,
+                json.dumps(ha.get("core_files", [])) if ha and ha.get("core_files") else None,
                 1 if ha else 0,
                 ha["pid"]                 if ha else None,
                 ha["mem_total"]           if ha else None,
@@ -678,6 +1016,31 @@ def poll_device(device):
             conn.execute(
                 "UPDATE devices SET reachable=1, last_seen=? WHERE id=?",
                 (now, device["id"]))
+
+            # Store diagnostic check results
+            for chk in checks:
+                conn.execute("""
+                    INSERT INTO device_checks(device_id, ts, check_type, result_json, alert_level, alert_detail)
+                    VALUES(?,?,?,?,?,?)
+                """, (device["id"], now, chk["check_type"],
+                      json.dumps(chk["result"]), chk["alert_level"], chk.get("alert_detail")))
+
+            # Update prev_* columns for next-poll change detection
+            for chk in checks:
+                ct = chk["check_type"]
+                r = chk["result"]
+                if ct == "route" and isinstance(r, dict):
+                    conn.execute("UPDATE devices SET prev_route_total=? WHERE id=?",
+                                 (r.get("_total_routes"), device["id"]))
+                elif ct == "path" and isinstance(r, dict):
+                    conn.execute("UPDATE devices SET prev_peer_count=?, prev_total_paths=? WHERE id=?",
+                                 (r.get("_total_peer_count"), r.get("_total_paths"), device["id"]))
+                elif ct == "stale_pi" and isinstance(r, dict):
+                    conn.execute("UPDATE devices SET prev_stale_pi_count=? WHERE id=?",
+                                 (r.get("count"), device["id"]))
+                elif ct == "stale_td" and isinstance(r, dict):
+                    conn.execute("UPDATE devices SET prev_stale_td_count=? WHERE id=?",
+                                 (r.get("count"), device["id"]))
 
     except Exception as exc:
         log.debug(f"  poll {device['ip']}:{device['console_port']} — {exc}")
@@ -858,7 +1221,8 @@ def _build_report_data(session_id):
         for dev in devices:
             samples = [dict(r) for r in conn.execute("""
                 SELECT ts, mem_total_kb, mem_free_kb, mem_available_kb, cpu_pct,
-                       ha_reachable, ha_mem_free_kb, ha_mem_total_kb, ha_cpu_pct, core_count
+                       ha_reachable, ha_mem_free_kb, ha_mem_total_kb, ha_cpu_pct,
+                       core_count, core_files_json, ha_core_files_json
                 FROM memory_samples
                 WHERE device_id=? AND ts>=? AND ts<=?
                 ORDER BY ts ASC
@@ -883,6 +1247,9 @@ def _build_report_data(session_id):
                 "first_ts":         samples[0]["ts"],
                 "last_ts":          samples[-1]["ts"],
             }
+            # Keep full samples for core file extraction before downsampling
+            dev["_all_samples"] = samples
+
             # Downsample for chart rendering to cap HTML size; summary uses all samples
             if len(samples) > MAX_CHART_SAMPLES:
                 step = max(1, len(samples) // MAX_CHART_SAMPLES)
@@ -894,28 +1261,136 @@ def _build_report_data(session_id):
                 dev["samples"] = samples
             result_devices.append(dev)
 
-    # Compute coredump alerts from sample data (no extra DB column needed)
+    # Compute coredump alerts from full (non-downsampled) sample data
     core_alerts = []
     for dev in result_devices:
+        all_samples = dev.pop("_all_samples")
         if dev["summary"]["core_count_max"] > 0:
-            # Find first sample where cores appeared
             first_core_ts = next(
-                (s["ts"] for s in dev["samples"] if (s["core_count"] or 0) > 0), None
+                (s["ts"] for s in all_samples if (s["core_count"] or 0) > 0), None
             )
+            # Collect unique core file names seen across all samples
+            seen_files = {}
+            for s in all_samples:
+                raw = s.get("core_files_json")
+                if not raw:
+                    continue
+                try:
+                    files = json.loads(raw) if isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                for f in (files if isinstance(files, list) else []):
+                    fname = f.get("name", "")
+                    if fname and fname not in seen_files:
+                        seen_files[fname] = {
+                            "name": fname,
+                            "file_ts": f.get("ts", 0),
+                            "first_poll": s["ts"],
+                        }
+            # Same for HA core files
+            ha_seen_files = {}
+            for s in all_samples:
+                raw = s.get("ha_core_files_json")
+                if not raw:
+                    continue
+                try:
+                    files = json.loads(raw) if isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                for f in (files if isinstance(files, list) else []):
+                    fname = f.get("name", "")
+                    if fname and fname not in ha_seen_files:
+                        ha_seen_files[fname] = {
+                            "name": fname,
+                            "file_ts": f.get("ts", 0),
+                            "first_poll": s["ts"],
+                        }
+
             core_alerts.append({
-                "device_name": dev.get("vm_name") or dev["ip"],
-                "ip":          dev["ip"],
-                "core_count":  dev["summary"]["core_count_max"],
-                "first_seen":  first_core_ts,
+                "device_name":   dev.get("vm_name") or dev["ip"],
+                "ip":            dev["ip"],
+                "core_count":    dev["summary"]["core_count_max"],
+                "first_seen":    first_core_ts,
+                "core_files":    list(seen_files.values()),
+                "ha_core_files": list(ha_seen_files.values()),
             })
 
+    # Strip core_files_json from chart samples to reduce payload size
+    for dev in result_devices:
+        for s in dev["samples"]:
+            s.pop("core_files_json", None)
+            s.pop("ha_core_files_json", None)
+
+    # Gather check alerts that occurred during the recording window
+    with get_db() as conn:
+        device_ids = [d["id"] for d in result_devices]
+        check_alerts_data = []
+        if device_ids:
+            ph = ",".join("?" * len(device_ids))
+            # Deduplicate: for each (device, check_type, alert_detail) group
+            # keep only one row with first_seen/last_seen and occurrence count.
+            check_rows = [dict(r) for r in conn.execute(f"""
+                SELECT dc.device_id, dc.check_type, dc.alert_level,
+                       dc.alert_detail,
+                       MIN(dc.ts) AS first_seen,
+                       MAX(dc.ts) AS last_seen,
+                       COUNT(*)   AS occurrences,
+                       d.device_type, d.ip, d.vm_name,
+                       h.name AS hypervisor_name
+                FROM device_checks dc
+                JOIN devices d ON dc.device_id = d.id
+                JOIN hypervisors h ON d.hypervisor_id = h.id
+                WHERE dc.device_id IN ({ph})
+                  AND dc.ts >= ? AND dc.ts <= ?
+                  AND dc.alert_level != 'ok'
+                GROUP BY dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail
+                ORDER BY
+                  CASE dc.alert_level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                  MAX(dc.ts) DESC
+            """, (*device_ids, start, stop)).fetchall()]
+
+            for cr in check_rows:
+                cr["ts"] = cr["last_seen"]
+                check_alerts_data.append(cr)
+
+        # Build per-device check summary (latest check results within window)
+        for dev in result_devices:
+            dev_checks = [c for c in check_alerts_data if c["device_id"] == dev["id"]]
+            # Unique check types with alert for this device
+            seen_types = set()
+            dev["check_alerts"] = []
+            for c in dev_checks:
+                key = (c["check_type"], c["alert_level"])
+                if key not in seen_types:
+                    seen_types.add(key)
+                    dev["check_alerts"].append({
+                        "check_type":  c["check_type"],
+                        "alert_level": c["alert_level"],
+                        "alert_detail": c["alert_detail"],
+                        "ts":          c["ts"],
+                    })
+
+    # Summarize check alerts by category for the report header
+    check_alert_summary = {}
+    for ca in check_alerts_data:
+        ct = ca["check_type"]
+        if ct not in check_alert_summary:
+            check_alert_summary[ct] = {"total": 0, "critical": 0, "warning": 0}
+        check_alert_summary[ct]["total"] += 1
+        if ca["alert_level"] == "critical":
+            check_alert_summary[ct]["critical"] += 1
+        elif ca["alert_level"] == "warning":
+            check_alert_summary[ct]["warning"] += 1
+
     return {
-        "session":        session,
-        "topology_label": topo_label,
-        "is_live":        session["status"] == "recording",
-        "window_end":     stop,
-        "devices":        result_devices,
-        "core_alerts":    core_alerts,
+        "session":              session,
+        "topology_label":       topo_label,
+        "is_live":              session["status"] == "recording",
+        "window_end":           stop,
+        "devices":              result_devices,
+        "core_alerts":          core_alerts,
+        "check_alerts":         check_alerts_data,
+        "check_alert_summary":  check_alert_summary,
     }
 
 
@@ -1087,6 +1562,18 @@ def api_devices():
         dev["core_files"]    = json.loads(dev.get("core_files")    or "[]")
         dev["ha_core_files"] = json.loads(dev.get("ha_core_files") or "[]")
         dev["memory"] = get_device_status(dev["id"])
+        # Latest diagnostic check status summary
+        with get_db() as conn:
+            chk_rows = conn.execute("""
+                SELECT check_type, alert_level
+                FROM device_checks dc
+                WHERE dc.device_id = ?
+                  AND dc.ts = (
+                      SELECT MAX(dc2.ts) FROM device_checks dc2
+                      WHERE dc2.device_id = dc.device_id AND dc2.check_type = dc.check_type
+                  )
+            """, (dev["id"],)).fetchall()
+        dev["checks_summary"] = {r["check_type"]: r["alert_level"] for r in chk_rows}
     return jsonify(rows)
 
 
@@ -1149,12 +1636,150 @@ def api_alerts():
                 "vm_name":     dev.get("vm_name") or dev["ip"],
                 "hypervisor":  dev["hypervisor_name"],
                 "alert":       st["alert"],
+                "alert_source": "memory",
                 "slope_kb_h":  st["slope_kb_h"],
                 "current":     st["current"],
                 "ha":          st["ha"],
             })
-    alerts.sort(key=lambda x: (x["alert"] != "critical", x["slope_kb_h"]))
+
+    # Check-based alerts
+    with get_db() as conn:
+        check_alerts = [dict(r) for r in conn.execute("""
+            SELECT dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail, dc.ts,
+                   d.device_type, d.ip, d.vm_name, h.name AS hypervisor_name
+            FROM device_checks dc
+            JOIN devices d ON dc.device_id = d.id
+            JOIN hypervisors h ON d.hypervisor_id = h.id
+            WHERE h.topology_id = ?
+              AND dc.alert_level != 'ok'
+              AND COALESCE(dc.dismissed, 0) = 0
+              AND dc.ts = (
+                  SELECT MAX(dc2.ts) FROM device_checks dc2
+                  WHERE dc2.device_id = dc.device_id
+                    AND dc2.check_type = dc.check_type
+              )
+        """, (tid,)).fetchall()]
+    for ca in check_alerts:
+        alerts.append({
+            "device_id":    ca["device_id"],
+            "device_type":  ca["device_type"],
+            "ip":           ca["ip"],
+            "vm_name":      ca.get("vm_name") or ca["ip"],
+            "hypervisor":   ca["hypervisor_name"],
+            "alert":        ca["alert_level"],
+            "alert_source": ca["check_type"],
+            "alert_detail": ca["alert_detail"],
+            "ts":           ca["ts"],
+            "slope_kb_h":   None,
+            "current":      None,
+            "ha":           None,
+        })
+
+    alerts.sort(key=lambda x: (x["alert"] != "critical", x.get("slope_kb_h") or 0))
     return jsonify(alerts)
+
+
+@app.route("/api/checks")
+def api_checks():
+    """Return latest check results with non-ok alerts for a topology."""
+    tid = request.args.get("topology", "chennai")
+    with get_db() as conn:
+        rows = [dict(r) for r in conn.execute("""
+            SELECT dc.id, dc.device_id, dc.ts, dc.check_type,
+                   dc.alert_level, dc.alert_detail,
+                   d.device_type, d.ip, d.vm_name,
+                   h.name AS hypervisor_name
+            FROM device_checks dc
+            JOIN devices d ON dc.device_id = d.id
+            JOIN hypervisors h ON d.hypervisor_id = h.id
+            WHERE h.topology_id = ?
+              AND dc.alert_level != 'ok'
+              AND COALESCE(dc.dismissed, 0) = 0
+              AND dc.ts = (
+                  SELECT MAX(dc2.ts) FROM device_checks dc2
+                  WHERE dc2.device_id = dc.device_id
+                    AND dc2.check_type = dc.check_type
+              )
+            ORDER BY
+              CASE dc.alert_level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+              dc.ts DESC
+        """, (tid,)).fetchall()]
+    return jsonify(rows)
+
+
+@app.route("/api/checks/dismiss", methods=["POST"])
+def api_checks_dismiss():
+    """Dismiss specific check alerts by ID list, or all for a topology."""
+    data = request.get_json(force=True) or {}
+    ids = data.get("ids")  # list of check IDs to dismiss
+    tid = data.get("topology")  # dismiss all for this topology
+
+    with get_db() as conn:
+        if ids and isinstance(ids, list):
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                f"UPDATE device_checks SET dismissed=1 WHERE id IN ({placeholders})",
+                ids)
+            return jsonify({"status": "dismissed", "count": len(ids)})
+        elif tid:
+            result = conn.execute("""
+                UPDATE device_checks SET dismissed=1
+                WHERE alert_level != 'ok' AND dismissed = 0
+                  AND device_id IN (
+                      SELECT d.id FROM devices d
+                      JOIN hypervisors h ON d.hypervisor_id = h.id
+                      WHERE h.topology_id = ?
+                  )
+            """, (tid,))
+            return jsonify({"status": "dismissed_all", "topology": tid})
+        else:
+            return jsonify({"error": "provide 'ids' array or 'topology'"}), 400
+
+
+@app.route("/api/device/<int:device_id>/checks")
+def api_device_checks(device_id):
+    """Return latest check result per check_type for a device."""
+    with get_db() as conn:
+        rows = [dict(r) for r in conn.execute("""
+            SELECT dc.*
+            FROM device_checks dc
+            WHERE dc.device_id = ?
+              AND dc.ts = (
+                  SELECT MAX(dc2.ts) FROM device_checks dc2
+                  WHERE dc2.device_id = dc.device_id
+                    AND dc2.check_type = dc.check_type
+              )
+            ORDER BY dc.check_type
+        """, (device_id,)).fetchall()]
+    for r in rows:
+        try:
+            r["result"] = json.loads(r["result_json"])
+        except (json.JSONDecodeError, TypeError):
+            r["result"] = None
+        del r["result_json"]
+    return jsonify(rows)
+
+
+@app.route("/api/device/<int:device_id>/checks/history")
+def api_device_checks_history(device_id):
+    """Return check history for a device and check_type over a time window."""
+    check_type = request.args.get("type", "tunnel")
+    hours = max(1, min(int(request.args.get("hours", 6)), 168))
+    since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    with get_db() as conn:
+        rows = [dict(r) for r in conn.execute("""
+            SELECT ts, result_json, alert_level, alert_detail
+            FROM device_checks
+            WHERE device_id = ? AND check_type = ? AND ts >= ?
+            ORDER BY ts ASC
+        """, (device_id, check_type, since)).fetchall()]
+    for r in rows:
+        try:
+            r["result"] = json.loads(r["result_json"])
+        except (json.JSONDecodeError, TypeError):
+            r["result"] = None
+        del r["result_json"]
+    return jsonify({"check_type": check_type, "samples": rows})
 
 
 @app.route("/api/rediscover", methods=["POST"])

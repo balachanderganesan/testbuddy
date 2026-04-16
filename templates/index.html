@@ -306,6 +306,13 @@
         <div class="sub">collected</div>
       </div>
     </div>
+    <div class="col-6 col-md-3 col-lg-2">
+      <div class="stat-card">
+        <div class="label"><i class="bi bi-shield-check me-1"></i>Check Alerts</div>
+        <div class="value" id="sumCheckAlerts" style="color:#3fb950">—</div>
+        <div class="sub" id="sumCheckAlertsSub">—</div>
+      </div>
+    </div>
   </div>
 
   <!-- Core dumps banner -->
@@ -315,6 +322,19 @@
       <strong class="text-danger">Core Dumps Found</strong>
     </div>
     <div id="coresList"></div>
+  </div>
+
+  <!-- Diagnostic checks banner -->
+  <div id="checksBanner" style="display:none" class="mb-4">
+    <div class="d-flex align-items-center mb-2 gap-2">
+      <i class="bi bi-shield-exclamation text-warning me-2"></i>
+      <strong class="text-warning">Active Check Alerts</strong>
+      <button class="btn btn-sm btn-outline-danger py-0 px-2 ms-auto" onclick="dismissAllCheckAlerts()"
+              title="Dismiss all check alerts">
+        <i class="bi bi-x-circle me-1"></i>Clear All
+      </button>
+    </div>
+    <div id="checksList"></div>
   </div>
 
   <!-- Filters + search -->
@@ -346,6 +366,7 @@
             <th title="HA standby peer reachable at 169.254.2.2">HA Peer</th>
             <th title="Memory health: OK = normal, WARNING = free &lt;15% or losing &gt;200 KB/h, CRITICAL = free &lt;8% or losing &gt;800 KB/h">
               Mem Status</th>
+            <th title="Diagnostic checks: T=Tunnel R=Route P=Path SP=StalePI ST=StaleTD H=Health D=DPDK">Checks</th>
           </tr>
         </thead>
         <tbody id="deviceTable"></tbody>
@@ -380,6 +401,18 @@
             <strong>HA Standby Peer (169.254.2.2)</strong>
           </div>
           <div class="row g-2" id="modalHaStats"></div>
+        </div>
+
+        <!-- Diagnostic Checks Panel -->
+        <div id="modalChecksPanel" class="mb-3" style="display:none">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <i class="bi bi-shield-check text-info"></i>
+            <strong style="font-size:.85rem">Diagnostic Checks</strong>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="loadDeviceChecks(activeDeviceId)">
+              <i class="bi bi-arrow-clockwise"></i>
+            </button>
+          </div>
+          <div id="modalChecksContent" class="row g-2"></div>
         </div>
 
         <!-- Time range -->
@@ -768,6 +801,16 @@ function renderTable(devices) {
       ? `<span class="${slopeClass(slope)}">${slope} ${slopeArrow(slope)}</span>`
       : "—";
 
+    // Diagnostic checks summary dots
+    const checkLabels = {tunnel:'T', route:'R', path:'P', stale_pi:'SP', stale_td:'ST', health:'H', dpdk_leak:'D', memory_top10:'M'};
+    const checksSum = dev.checks_summary || {};
+    const checkDots = Object.entries(checkLabels).map(([ct, lbl]) => {
+      const lvl = checksSum[ct];
+      if (!lvl) return '';
+      const clr = lvl === 'critical' ? '#f85149' : lvl === 'warning' ? '#d29922' : '#3fb950';
+      return `<span title="${ct}: ${lvl}" style="color:${clr};font-size:.6rem;font-weight:700;margin-right:2px">${lbl}</span>`;
+    }).join('');
+
     return `<tr onclick="openModal(${dev.id})">
       <td>${typeIcon}${dev.device_type}</td>
       <td>${vmName}</td>
@@ -782,8 +825,239 @@ function renderTable(devices) {
       <td>${cores}</td>
       <td>${haCell}</td>
       <td><span class="badge ${alertBadgeClass(alert)}">${alertLabel(alert)}</span></td>
+      <td>${checkDots || '<span class="text-muted">—</span>'}</td>
     </tr>`;
   }).join("");
+}
+
+// ── Diagnostic checks ────────────────────────────────────────────────────────
+const CHECK_LABELS = {
+  tunnel:'Tunnel Status', route:'Route Summary', path:'Path Summary',
+  stale_pi:'Stale PI Flows', stale_td:'Stale TD Flows',
+  health:'Health Report', memory_top10:'Memory Top 10', dpdk_leak:'DPDK Leaks'
+};
+
+let _checkAlertsData = [];  // cached for dismiss operations
+
+function _renderCheckAlertItem(c) {
+  const typeIcon = c.device_type === 'edge'
+    ? '<i class="bi bi-cpu text-primary me-1"></i>'
+    : '<i class="bi bi-diagram-3 text-success me-1"></i>';
+  const name = c.vm_name || c.ip;
+  const badge = c.alert_level === 'critical' ? 'badge-critical' : 'badge-warning';
+  return `<div class="alert-item d-flex align-items-center gap-2" data-check-id="${c.id}">
+    <input type="checkbox" class="form-check-input check-dismiss-cb" value="${c.id}"
+           onclick="event.stopPropagation(); updateDismissSelected()" style="margin:0;min-width:14px">
+    <span class="badge ${badge}" style="font-size:.65rem">${c.alert_level.toUpperCase()}</span>
+    ${typeIcon}<strong>${name}</strong>
+    <code class="text-muted" style="font-size:.72rem">${c.ip}</code>
+    <span class="text-muted" style="font-size:.72rem">${c.alert_detail || ''}</span>
+    <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto"
+            onclick="event.stopPropagation(); openModal(${c.device_id})"
+            title="View device details">
+      <i class="bi bi-graph-up"></i>
+    </button>
+    <button class="btn btn-sm btn-outline-danger py-0 px-2"
+            onclick="event.stopPropagation(); dismissCheckAlerts([${c.id}])"
+            title="Dismiss this alert">
+      <i class="bi bi-x"></i>
+    </button>
+  </div>`;
+}
+
+async function loadCheckAlerts() {
+  try {
+    const checks = await fetch(`/api/checks?topology=${currentTopology}`).then(r => r.json());
+    _checkAlertsData = checks;
+    const banner = document.getElementById("checksBanner");
+    const list = document.getElementById("checksList");
+    const sumEl = document.getElementById("sumCheckAlerts");
+    const sumSub = document.getElementById("sumCheckAlertsSub");
+
+    sumEl.textContent = checks.length;
+    sumEl.style.color = checks.length > 0 ? "#d29922" : "#3fb950";
+    const crits = checks.filter(c => c.alert_level === 'critical').length;
+    const warns = checks.filter(c => c.alert_level === 'warning').length;
+    sumSub.textContent = checks.length ? `${crits} crit \u00b7 ${warns} warn` : "All clear";
+
+    if (!checks.length) { banner.style.display = "none"; return; }
+    banner.style.display = "block";
+
+    // Group by check_type
+    const groups = {};
+    for (const c of checks) {
+      (groups[c.check_type] = groups[c.check_type] || []).push(c);
+    }
+
+    const VISIBLE_LIMIT = 10;
+    let html = `<div class="d-flex gap-2 mb-2">
+      <button class="btn btn-sm btn-outline-warning py-0 px-2" id="btnDismissSelected"
+              onclick="dismissSelectedCheckAlerts()" disabled style="font-size:.72rem">
+        <i class="bi bi-x-circle me-1"></i>Dismiss Selected
+      </button>
+    </div>`;
+
+    for (const [ct, items] of Object.entries(groups)) {
+      const label = CHECK_LABELS[ct] || ct;
+      const catCrits = items.filter(i => i.alert_level === 'critical').length;
+      const catWarns = items.filter(i => i.alert_level === 'warning').length;
+      const catId = `chkCat_${ct}`;
+      const visible = items.slice(0, VISIBLE_LIMIT);
+      const overflow = items.slice(VISIBLE_LIMIT);
+
+      html += `<div class="mb-2">
+        <div class="d-flex align-items-center gap-2 mb-1">
+          <strong style="font-size:.78rem;color:#8b949e">${label}</strong>
+          <span class="badge bg-secondary" style="font-size:.6rem">${items.length}</span>
+          ${catCrits ? `<span class="badge badge-critical" style="font-size:.6rem">${catCrits} crit</span>` : ''}
+          ${catWarns ? `<span class="badge badge-warning" style="font-size:.6rem">${catWarns} warn</span>` : ''}
+        </div>
+        ${visible.map(c => _renderCheckAlertItem(c)).join('')}`;
+
+      if (overflow.length) {
+        html += `<div id="${catId}_overflow" style="display:none">
+          ${overflow.map(c => _renderCheckAlertItem(c)).join('')}
+        </div>
+        <button class="btn btn-sm btn-link py-0 px-1" style="font-size:.72rem"
+                id="${catId}_toggle"
+                onclick="toggleCheckCategory('${catId}')">
+          Show ${overflow.length} more...
+        </button>`;
+      }
+      html += `</div>`;
+    }
+    list.innerHTML = html;
+  } catch(e) { console.error("loadCheckAlerts:", e); }
+}
+
+function toggleCheckCategory(catId) {
+  const el = document.getElementById(catId + '_overflow');
+  const btn = document.getElementById(catId + '_toggle');
+  if (!el) return;
+  if (el.style.display === 'none') {
+    el.style.display = 'block';
+    btn.textContent = 'Show less';
+  } else {
+    el.style.display = 'none';
+    const count = el.querySelectorAll('.alert-item').length;
+    btn.textContent = `Show ${count} more...`;
+  }
+}
+
+function updateDismissSelected() {
+  const checked = document.querySelectorAll('.check-dismiss-cb:checked');
+  const btn = document.getElementById('btnDismissSelected');
+  if (btn) btn.disabled = checked.length === 0;
+}
+
+async function dismissCheckAlerts(ids) {
+  try {
+    await fetch('/api/checks/dismiss', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids})
+    });
+    loadCheckAlerts();
+  } catch(e) { console.error("dismissCheckAlerts:", e); }
+}
+
+async function dismissSelectedCheckAlerts() {
+  const checked = document.querySelectorAll('.check-dismiss-cb:checked');
+  const ids = Array.from(checked).map(cb => parseInt(cb.value));
+  if (ids.length) await dismissCheckAlerts(ids);
+}
+
+async function dismissAllCheckAlerts() {
+  if (!confirm('Dismiss all active check alerts for this topology?')) return;
+  try {
+    await fetch('/api/checks/dismiss', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({topology: currentTopology})
+    });
+    loadCheckAlerts();
+  } catch(e) { console.error("dismissAllCheckAlerts:", e); }
+}
+
+function renderCheckResult(type, result) {
+  if (!result) return '';
+  try {
+    if (type === 'tunnel' || type === 'path') {
+      const rows = (Array.isArray(result.peers || result) ? (result.peers || result) : []).map(e =>
+        `<tr><td>${e.peer_type||'—'}</td><td>${e.stable||0}</td><td>${e.unstable||0}</td><td>${e.dead||0}</td><td>${e.total_paths||0}</td></tr>`
+      ).join('');
+      if (!rows) return '';
+      return `<table class="table table-sm table-borderless mb-0" style="font-size:.7rem">
+        <thead><tr><th>Peer</th><th>Stable</th><th>Unstable</th><th>Dead</th><th>Total</th></tr></thead>
+        <tbody>${rows}</tbody></table>`;
+    }
+    if (type === 'route') {
+      const t = result._total_routes;
+      const p = result._prev_total;
+      let info = `<div style="font-size:.72rem">Total routes: <strong>${t ?? '—'}</strong>`;
+      if (p != null) info += ` (prev: ${p})`;
+      info += '</div>';
+      return info;
+    }
+    if (type === 'stale_pi' || type === 'stale_td') {
+      return `<div style="font-size:.72rem">Count: <strong>${result.count ?? 0}</strong></div>`;
+    }
+    if (type === 'health') {
+      const items = [];
+      if (result.cpu_300s_avg_pct != null) items.push(`CPU 300s: ${result.cpu_300s_avg_pct}%`);
+      if (result.cpu_30s_avg_pct != null) items.push(`CPU 30s: ${result.cpu_30s_avg_pct}%`);
+      const mem = result.edged_mem_usage_pct ?? result.gatewayd_mem_usage_pct;
+      if (mem != null) items.push(`Mem: ${mem}%`);
+      if (result.flow_count != null) items.push(`Flows: ${result.flow_count}`);
+      if (result.handoffq_drops != null) items.push(`HO drops: ${result.handoffq_drops}`);
+      return `<div style="font-size:.72rem">${items.join(' &middot; ') || '—'}</div>`;
+    }
+    if (type === 'memory_top10') {
+      const rows = (Array.isArray(result) ? result : []).map(e =>
+        `<tr><td>${e.name||'—'}</td><td>${e.bytes != null ? (e.bytes/1024/1024).toFixed(1)+' MB' : '—'}</td><td>${e.count??'—'}</td></tr>`
+      ).join('');
+      if (!rows) return '';
+      return `<table class="table table-sm table-borderless mb-0" style="font-size:.7rem">
+        <thead><tr><th>Allocator</th><th>Size</th><th>Count</th></tr></thead>
+        <tbody>${rows}</tbody></table>`;
+    }
+    if (type === 'dpdk_leak') {
+      return `<div style="font-size:.72rem">Leak count: <strong>${result.leak_count ?? 0}</strong></div>`;
+    }
+  } catch(e) {}
+  return '';
+}
+
+async function loadDeviceChecks(deviceId) {
+  if (!deviceId) return;
+  const panel = document.getElementById("modalChecksPanel");
+  const container = document.getElementById("modalChecksContent");
+  try {
+    const checks = await fetch(`/api/device/${deviceId}/checks`).then(r => r.json());
+    if (!checks.length) { panel.style.display = "none"; return; }
+    panel.style.display = "block";
+    container.innerHTML = checks.map(chk => {
+      const label = CHECK_LABELS[chk.check_type] || chk.check_type;
+      const badgeClass = chk.alert_level === 'critical' ? 'badge-critical'
+                       : chk.alert_level === 'warning'  ? 'badge-warning' : 'badge-ok';
+      const detail = chk.alert_detail || 'OK';
+      const resultHtml = renderCheckResult(chk.check_type, chk.result);
+      return `<div class="col-12 col-md-6">
+        <div style="background:#1c2128;border:1px solid #30363d;border-radius:8px;padding:.6rem .8rem;">
+          <div class="d-flex align-items-center justify-content-between mb-1">
+            <strong style="font-size:.78rem">${label}</strong>
+            <span class="badge ${badgeClass}" style="font-size:.65rem">${chk.alert_level.toUpperCase()}</span>
+          </div>
+          <div style="font-size:.72rem;color:#8b949e;margin-bottom:.3rem">${detail}</div>
+          ${resultHtml}
+          <div style="font-size:.65rem;color:#6e7681;margin-top:.25rem">${fmtTime(chk.ts)}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    panel.style.display = "none";
+    console.error("loadDeviceChecks:", e);
+  }
 }
 
 // ── Filter ────────────────────────────────────────────────────────────────────
@@ -886,6 +1160,7 @@ async function loadHistory(hours) {
   }
 
   buildChart(samples, pid, hours);
+  loadDeviceChecks(activeDeviceId);
 }
 
 function buildChart(samples, currentPid, hours) {
@@ -1449,12 +1724,24 @@ function _applyReportDetailData(data) {
   // Coredump alert banner
   let alertBanner = "";
   if (data.core_alerts && data.core_alerts.length > 0) {
-    const alerts = data.core_alerts.map(a =>
-      `<div><i class="bi bi-bug-fill text-danger me-2"></i>` +
-      `<strong>${a.device_name}</strong> (${a.ip}) — ` +
-      `${a.core_count} core dump${a.core_count > 1 ? "s" : ""} detected` +
-      (a.first_seen ? ` at ${fmtTime(a.first_seen)}` : "") + `</div>`
-    ).join("");
+    const alerts = data.core_alerts.map(a => {
+      let fileList = '';
+      const files = (a.core_files || []).concat(
+        (a.ha_core_files || []).map(f => ({...f, name: `[HA] ${f.name}`}))
+      );
+      if (files.length) {
+        fileList = `<div style="margin-left:1.5rem;font-size:.72rem;color:#8b949e;margin-top:2px">` +
+          files.map(f => {
+            const dt = f.file_ts ? new Date(f.file_ts * 1000).toISOString().slice(0,19).replace('T',' ') : '';
+            return `<div><code>${f.name}</code>${dt ? ` <span class="text-muted">(${dt})</span>` : ''}</div>`;
+          }).join('') + `</div>`;
+      }
+      return `<div style="margin-bottom:4px"><i class="bi bi-bug-fill text-danger me-2"></i>` +
+        `<strong>${a.device_name}</strong> (${a.ip}) — ` +
+        `${a.core_count} core dump${a.core_count > 1 ? "s" : ""} detected` +
+        (a.first_seen ? ` at ${fmtTime(a.first_seen)}` : "") +
+        `${fileList}</div>`;
+    }).join("");
     alertBanner = `
     <div class="core-alert-banner">
       <div class="fw-bold mb-1 text-danger">
@@ -1464,7 +1751,68 @@ function _applyReportDetailData(data) {
     </div>`;
   }
 
-  el.innerHTML = alertBanner + (data.devices.length === 0
+  // Check alerts banner
+  let checkAlertBanner = "";
+  if (data.check_alerts && data.check_alerts.length > 0) {
+    const summary = data.check_alert_summary || {};
+    const catHtml = Object.entries(summary).map(([ct, s]) => {
+      const label = CHECK_LABELS[ct] || ct;
+      return `<span class="badge bg-secondary me-1" style="font-size:.65rem">${label}: ${s.total}`
+        + (s.critical ? ` <span style="color:#f85149">(${s.critical} crit)</span>` : '')
+        + (s.warning ? ` <span style="color:#d29922">(${s.warning} warn)</span>` : '')
+        + `</span>`;
+    }).join('');
+
+    function _reportCheckRow(a) {
+      const badge = a.alert_level === 'critical' ? 'badge-critical' : 'badge-warning';
+      const typeIcon = a.device_type === 'edge'
+        ? '<i class="bi bi-cpu text-primary me-1"></i>'
+        : '<i class="bi bi-diagram-3 text-success me-1"></i>';
+      const name = a.vm_name || a.ip;
+      const occ = (a.occurrences || 1) > 1
+        ? `<span class="badge bg-secondary" style="font-size:.58rem" title="Seen ${a.occurrences} times between ${fmtTime(a.first_seen)} and ${fmtTime(a.last_seen)}">\u00d7${a.occurrences}</span>`
+        : '';
+      return `<div style="font-size:.75rem;padding:3px 0">
+        <span class="badge ${badge}" style="font-size:.6rem">${a.alert_level.toUpperCase()}</span>
+        ${typeIcon}<strong>${name}</strong>
+        <code class="text-muted" style="font-size:.7rem">${a.ip}</code>
+        <span class="badge bg-secondary" style="font-size:.6rem">${CHECK_LABELS[a.check_type] || a.check_type}</span>
+        <span class="text-muted" style="font-size:.7rem">${a.alert_detail || ''}</span>
+        ${occ}
+        <span class="text-muted" style="font-size:.65rem;margin-left:4px">${fmtTime(a.last_seen || a.ts)}</span>
+      </div>`;
+    }
+
+    const SHOW_LIMIT = 15;
+    const visible = data.check_alerts.slice(0, SHOW_LIMIT);
+    const overflow = data.check_alerts.slice(SHOW_LIMIT);
+    const alertRows = visible.map(_reportCheckRow).join('');
+
+    let overflowHtml = '';
+    if (overflow.length) {
+      const overflowRows = overflow.map(_reportCheckRow).join('');
+      overflowHtml = `<div id="reportCheckOverflow" style="display:none">${overflowRows}</div>
+        <button class="btn btn-sm btn-link py-0 px-1" style="font-size:.72rem"
+                onclick="const el=document.getElementById('reportCheckOverflow');
+                  if(el.style.display==='none'){el.style.display='block';this.textContent='Show less'}
+                  else{el.style.display='none';this.textContent='Show ${overflow.length} more...'}">
+          Show ${overflow.length} more...
+        </button>`;
+    }
+
+    checkAlertBanner = `
+    <div style="background:#1c1c1c;border:1px solid #30363d;border-radius:8px;padding:.8rem 1rem;margin-bottom:1rem">
+      <div class="fw-bold mb-1" style="color:#d29922">
+        <i class="bi bi-shield-exclamation me-2"></i>Check Alerts During Recording
+        <span class="badge bg-secondary ms-2" style="font-size:.65rem">${data.check_alerts.length} total</span>
+      </div>
+      <div class="mb-2">${catHtml}</div>
+      ${alertRows}
+      ${overflowHtml}
+    </div>`;
+  }
+
+  el.innerHTML = alertBanner + checkAlertBanner + (data.devices.length === 0
     ? '<div class="text-muted text-center py-4">No device data captured yet.</div>'
     : "");
 
@@ -1515,11 +1863,19 @@ function renderReportDetail(data, container) {
     const coreBadge = sm.core_count_max > 0
       ? `<span class="badge badge-critical ms-1" style="font-size:.65rem">` +
         `<i class="bi bi-bug-fill me-1"></i>${sm.core_count_max} cores</span>` : "";
+    // Per-device check alert badges
+    const devChecks = dev.check_alerts || [];
+    const checkBadges = devChecks.map(ca => {
+      const cls = ca.alert_level === 'critical' ? 'badge-critical' : 'badge-warning';
+      const lbl = CHECK_LABELS[ca.check_type] || ca.check_type;
+      return `<span class="badge ${cls}" style="font-size:.6rem" title="${ca.alert_detail || ''}">${lbl}</span>`;
+    }).join(' ');
     return `
     <div class="tbl-wrap mb-4">
       <div class="p-3 pb-2">
         <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
           <h6 class="mb-0">${typeIcon}${name}${coreBadge}</h6>
+          ${checkBadges}
           <code class="text-muted" style="font-size:.72rem">${dev.ip}</code>
           <span class="text-muted" style="font-size:.72rem">${dev.hypervisor_name}</span>
           <span class="badge bg-secondary ms-auto" style="font-size:.65rem">${sm.sample_count} samples</span>
@@ -1632,7 +1988,7 @@ function closeReportDetail() {
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadAlerts(), loadDevices()]);
+  await Promise.all([loadSummary(), loadAlerts(), loadDevices(), loadCheckAlerts()]);
   checkRecordingStatus();
   // Refresh active-recordings section if Reports tab is visible
   if (document.getElementById("reportsPanel").style.display !== "none" && activeReportId === null) {
