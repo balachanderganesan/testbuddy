@@ -176,7 +176,6 @@ def init_db():
         _add_col_if_missing(conn, "recording_sessions", "poll_interval_sec INTEGER DEFAULT 300")
         _add_col_if_missing(conn, "recording_sessions", "last_polled_at TEXT")
         _add_col_if_missing(conn, "recording_sessions", "hypervisor_id INTEGER")
-        _add_col_if_missing(conn, "recording_sessions", "core_alerts TEXT DEFAULT '[]'")
         _add_col_if_missing(conn, "devices", "vm_name TEXT")
         _add_col_if_missing(conn, "devices", "core_files TEXT")
         _add_col_if_missing(conn, "devices", "ha_core_files TEXT")
@@ -767,6 +766,10 @@ def get_device_status(device_id):
     }
 
 
+# Max chart data points per device embedded in reports. Beyond this, samples are
+# downsampled evenly so the HTML file stays a manageable size.
+MAX_CHART_SAMPLES = 500
+
 # ── Report data builder ───────────────────────────────────────────────────────
 
 def _build_report_data(session_id):
@@ -837,7 +840,15 @@ def _build_report_data(session_id):
                 "first_ts":         samples[0]["ts"],
                 "last_ts":          samples[-1]["ts"],
             }
-            dev["samples"] = samples
+            # Downsample for chart rendering to cap HTML size; summary uses all samples
+            if len(samples) > MAX_CHART_SAMPLES:
+                step = max(1, len(samples) // MAX_CHART_SAMPLES)
+                chart_samples = samples[::step]
+                if chart_samples[-1] is not samples[-1]:
+                    chart_samples.append(samples[-1])
+                dev["samples"] = chart_samples
+            else:
+                dev["samples"] = samples
             result_devices.append(dev)
 
     # Compute coredump alerts from sample data (no extra DB column needed)
@@ -882,6 +893,7 @@ def _poll_recording_devices(session: dict):
                 SELECT d.*, h.ip AS hypervisor_ip
                 FROM devices d JOIN hypervisors h ON d.hypervisor_id = h.id
                 WHERE d.hypervisor_id=?
+                  AND NOT (d.console_port >= 2200 AND d.console_port <= 2299)
             """, (hv_id,)).fetchall()]
         else:
             devices = [dict(r) for r in conn.execute("""
@@ -1321,6 +1333,8 @@ def api_recording_stop():
             "UPDATE recording_sessions SET stopped_at=?, status=?, sample_count=?, device_count=? WHERE id=?",
             (now, status, sc, dc, sid)
         )
+    # Remove from in-memory poll tracker so the manager ignores it immediately
+    _rec_last_polled.pop(sid, None)
     return jsonify({
         "id": sid, "topology": tid, "hypervisor_id": hv_id,
         "started_at": started, "stopped_at": now,

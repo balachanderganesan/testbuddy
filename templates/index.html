@@ -236,13 +236,6 @@
       <select id="reportTopoFilter" class="form-select form-select-sm rec-select"
               onchange="loadReports()">
         <option value="">All Topologies</option>
-        <option value="chennai">Chennai Solutions Topology</option>
-        <option value="sc_tb1">TB1</option>
-        <option value="sc_tb2">TB2</option>
-        <option value="sc_tb3">TB3</option>
-        <option value="sc_tb4">TB4</option>
-        <option value="sc_tb5">TB5</option>
-        <option value="standard_testbeds">Standard Testbeds</option>
       </select>
       <button class="btn btn-sm btn-outline-secondary ms-auto" onclick="loadReports()">
         <i class="bi bi-arrow-clockwise me-1"></i>Refresh
@@ -447,6 +440,9 @@ const TOPO_LABELS = {
 };
 
 function switchMainTab(which) {
+  // Stop any live-report auto-refresh timer when leaving the reports tab
+  if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
+
   const isSC       = which === "sc";
   const isStandard = which === "standard";
   const isReports  = which === "reports";
@@ -1032,6 +1028,31 @@ async function loadRecordingOptions() {
   const cur = currentTopology.startsWith("sc_") || currentTopology === "chennai" ? currentTopology : null;
   if (cur) sel.value = cur;
   onRecTopoChange();
+
+  // Populate the reports filter dropdown with the same topology-level options
+  _populateReportFilterOptions(options);
+}
+
+function _populateReportFilterOptions(options) {
+  const filter = document.getElementById("reportTopoFilter");
+  if (!filter) return;
+  const prev = filter.value;
+  filter.innerHTML = '<option value="">All Topologies</option>';
+  // Add only topology-level entries (not individual bastions which have hypervisor_id)
+  const topoOpts = options.filter(o => !o.hypervisor_id);
+  if (topoOpts.length) {
+    const og = document.createElement("optgroup");
+    og.label = "Topology";
+    topoOpts.forEach(o => {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      og.appendChild(opt);
+    });
+    filter.appendChild(og);
+  }
+  // Restore previous selection if still valid
+  if (prev && filter.querySelector(`option[value="${prev}"]`)) filter.value = prev;
 }
 
 function onRecTopoChange() {
