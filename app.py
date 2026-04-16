@@ -37,6 +37,7 @@ REDISCOVER_INTERVAL  = 600    # seconds between iptables re-scans
 SSH_TIMEOUT          = 15     # SSH connect + exec timeout (seconds)
 HA_SSH_TIMEOUT       = 8      # timeout for each SSH hop to 169.254.2.2
 DB_RETENTION_HOURS   = 168    # keep 7 days of samples
+POLL_WORKERS         = 50     # max concurrent SSH sessions during a poll run
 
 DEVICE_USER = "root"
 DEVICE_PASS = "velocloud"
@@ -78,19 +79,6 @@ TOPOLOGIES = {
         "label": "Standard Testbeds",
         "servers_json": None,       # dynamic — bastion hosts added via /api/bastion/add
         "server_names": None,
-        "port_rules": "standard",
-    },
-}
-
-# Port classification rules per topology type
-PORT_RULES = {
-    "default": {
-        "is_edge":    lambda p: (2000 <= p < 2200) or (2300 <= p < 3000),
-        "is_gateway": lambda p: 4000 <= p < 4010,
-    },
-    "standard": {
-        "is_edge":    lambda p: 1000 <= p <= 1020,
-        "is_gateway": lambda p: 2010 <= p <= 2015,
     },
 }
 
@@ -108,6 +96,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)  # suppress non-SSH banner noise
 
 app = Flask(__name__)
 
@@ -240,24 +229,87 @@ _DNAT_RE = re.compile(
 )
 
 
-def discover_on_hypervisor(hv, port_rules=None):
-    if port_rules is None:
-        port_rules = PORT_RULES["default"]
+def _detect_vm_type(hv_ip, console_port):
+    """
+    SSH into a VM via the hypervisor NAT and detect its type by checking
+    which VeloCloud process is running (edged → edge, gwd → gateway).
+    Returns 'edge', 'gateway', or None if neither process is found.
+    """
+    try:
+        ssh = ssh_connect(hv_ip, console_port, DEVICE_USER, DEVICE_PASS)
+        out = ssh_run(
+            ssh,
+            "pgrep -o edged >/dev/null 2>&1 && echo edge; "
+            "pgrep -o gwd   >/dev/null 2>&1 && echo gateway",
+            timeout=SSH_TIMEOUT,
+        )
+        ssh.close()
+        if "edge"    in out: return "edge"
+        if "gateway" in out: return "gateway"
+    except Exception:
+        pass
+    return None
+
+
+def discover_on_hypervisor(hv, known_types):
+    """
+    Discover VeloCloud VMs on a hypervisor.
+
+    known_types: dict of {vm_ip: device_type} already stored in the DB for
+                 this hypervisor.  VMs in this dict skip the SSH type-probe —
+                 their type is stable (an edge stays an edge).  Only genuinely
+                 new VM IPs are probed via SSH to detect edge vs gateway.
+    """
     found, ok = [], False
     try:
         ssh = ssh_connect(hv["ip"], hv["port"], hv["username"], hv["password"])
         out = ssh_run(ssh, "iptables -t nat -S 2>/dev/null")
         ssh.close()
-        for m in _DNAT_RE.finditer(out):
-            port, vm_ip, vm_port = int(m.group(1)), m.group(2), int(m.group(3))
-            if port_rules["is_edge"](port):
-                dtype = "edge"
-            elif port_rules["is_gateway"](port):
-                dtype = "gateway"
-            else:
-                continue
-            found.append({"device_type": dtype, "ip": vm_ip, "console_port": port, "vm_port": vm_port})
-        log.info(f"  [{hv['name']}] {len(found)} devices")
+
+        all_rules = [
+            (int(m.group(1)), m.group(2), int(m.group(3)))
+            for m in _DNAT_RE.finditer(out)
+        ]
+
+        lock    = threading.Lock()
+        vm_seen = set()
+
+        def _probe(hv_port, vm_ip, vm_port):
+            with lock:
+                if vm_ip in vm_seen:
+                    return
+                # Already known — reuse stored type, no SSH needed.
+                if vm_ip in known_types:
+                    vm_seen.add(vm_ip)
+                    found.append({
+                        "device_type":  known_types[vm_ip],
+                        "ip":           vm_ip,
+                        "console_port": hv_port,
+                        "vm_port":      vm_port,
+                    })
+                    return
+            # New VM — probe via SSH to detect type.
+            dtype = _detect_vm_type(hv["ip"], hv_port)
+            if dtype:
+                with lock:
+                    if vm_ip not in vm_seen:
+                        vm_seen.add(vm_ip)
+                        found.append({
+                            "device_type":  dtype,
+                            "ip":           vm_ip,
+                            "console_port": hv_port,
+                            "vm_port":      vm_port,
+                        })
+
+        probe_threads = [
+            threading.Thread(target=_probe, args=rule, daemon=True)
+            for rule in all_rules
+        ]
+        for t in probe_threads: t.start()
+        for t in probe_threads: t.join(timeout=SSH_TIMEOUT + 5)
+
+        new_count = sum(1 for ip in vm_seen if ip not in known_types)
+        log.info(f"  [{hv['name']}] {len(found)} VMs ({new_count} new)")
         ok = True
     except Exception as exc:
         log.warning(f"  [{hv['name']}] discovery failed: {exc}")
@@ -297,18 +349,24 @@ def run_discovery(topology_id="chennai"):
                     "UPDATE hypervisors SET name=?,port=?,username=?,password=?,topology_id=? WHERE ip=?",
                     (name, port, user, pw, topology_id, ip))
 
-    rules_key  = topo.get("port_rules", "default")
-    port_rules = PORT_RULES.get(rules_key, PORT_RULES["default"])
-
     with get_db() as conn:
         hvs = [dict(r) for r in conn.execute(
             "SELECT * FROM hypervisors WHERE topology_id=?", (topology_id,)
         ).fetchall()]
+        # Load already-known VM types keyed by hypervisor_id so probing is
+        # skipped for existing VMs (type is stable — edge stays edge).
+        known = {}
+        for row in conn.execute(
+            "SELECT hypervisor_id, ip, device_type FROM devices "
+            "WHERE hypervisor_id IN (SELECT id FROM hypervisors WHERE topology_id=?)",
+            (topology_id,)
+        ).fetchall():
+            known.setdefault(row["hypervisor_id"], {})[row["ip"]] = row["device_type"]
 
     results, lock = {}, threading.Lock()
 
     def _disc(hv):
-        devs, ok = discover_on_hypervisor(hv, port_rules)
+        devs, ok = discover_on_hypervisor(hv, known.get(hv["id"], {}))
         with lock:
             results[hv["id"]] = (hv, devs, ok)
 
@@ -322,6 +380,9 @@ def run_discovery(topology_id="chennai"):
             conn.execute(
                 "UPDATE hypervisors SET last_seen=?,reachable=? WHERE id=?",
                 (now, 1 if ok else 0, hv_id))
+            if not ok:
+                continue
+            found_ips = {d["ip"] for d in devs}
             for d in devs:
                 vm_port = d.get("vm_port", 22)
                 conn.execute(
@@ -331,12 +392,14 @@ def run_discovery(topology_id="chennai"):
                 conn.execute(
                     "UPDATE devices SET device_type=?,console_port=?,vm_port=?,last_seen=? WHERE ip=? AND hypervisor_id=?",
                     (d["device_type"], d["console_port"], vm_port, now, d["ip"], hv_id))
-
-    # For default port rules, purge VeloCloud-specific non-device port ranges
-    if rules_key == "default":
-        with get_db() as conn:
-            conn.execute("DELETE FROM devices WHERE console_port >= 2200 AND console_port <= 2299")
-            conn.execute("DELETE FROM devices WHERE console_port >= 4010 AND console_port <= 4999")
+            # Remove devices that disappeared from this hypervisor
+            if found_ips:
+                placeholders = ",".join("?" * len(found_ips))
+                conn.execute(
+                    f"DELETE FROM devices WHERE hypervisor_id=? AND ip NOT IN ({placeholders})",
+                    (hv_id, *found_ips))
+            else:
+                conn.execute("DELETE FROM devices WHERE hypervisor_id=?", (hv_id,))
 
     log.info(f"=== Discovery complete [{topology_id}] ===")
 
@@ -581,10 +644,12 @@ def run_poll():
         log.info("No devices in DB yet — waiting for discovery")
         return
 
-    log.info(f"Polling {len(devices)} devices...")
-    threads = [threading.Thread(target=poll_device, args=(d,), daemon=True) for d in devices]
-    for t in threads: t.start()
-    for t in threads: t.join(timeout=SSH_TIMEOUT + 5)
+    log.info(f"Polling {len(devices)} devices (max {POLL_WORKERS} concurrent)...")
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=POLL_WORKERS) as pool:
+        futures = {pool.submit(poll_device, d): d for d in devices}
+        for f in as_completed(futures, timeout=len(devices) * (SSH_TIMEOUT + 5) / POLL_WORKERS + 30):
+            pass  # poll_device handles its own DB writes and errors
     log.info("Poll complete")
 
 
@@ -926,5 +991,5 @@ if __name__ == "__main__":
     init_db()
     log.info("Starting background collector...")
     threading.Thread(target=background_loop, daemon=True).start()
-    log.info("Starting web server on http://0.0.0.0:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    log.info("Starting web server on http://0.0.0.0:5001")
+    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)

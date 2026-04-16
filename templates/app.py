@@ -926,5 +926,5 @@ if __name__ == "__main__":
     init_db()
     log.info("Starting background collector...")
     threading.Thread(target=background_loop, daemon=True).start()
-    log.info("Starting web server on http://0.0.0.0:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    log.info("Starting web server on http://0.0.0.0:5001")
+    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)
