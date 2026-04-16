@@ -993,11 +993,13 @@ function buildChart(samples, currentPid, hours) {
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 async function triggerRediscover() {
-  await fetch(`/api/rediscover?topology=${currentTopology}`,{method:"POST"});
+  const r = await fetch(`/api/rediscover?topology=${currentTopology}`,{method:"POST"});
+  if (r.status === 409) { const d = await r.json(); toast(`Busy: ${d.reason}`, "warn"); return; }
   toast("Discovery started — check logs for progress");
 }
 async function triggerPollNow() {
-  await fetch("/api/poll_now",{method:"POST"});
+  const r = await fetch("/api/poll_now",{method:"POST"});
+  if (r.status === 409) { const d = await r.json(); toast(`Busy: ${d.reason}`, "warn"); return; }
   toast("Poll triggered");
   setTimeout(refreshAll, 8000);
 }
@@ -1145,10 +1147,11 @@ async function toggleRecording() {
   }
 }
 
-function toast(msg) {
+function toast(msg, level) {
+  const bg = level === "warn" ? "#b08800" : level === "error" ? "#b62324" : "#1f6feb";
   const t = document.createElement("div");
   t.className = "position-fixed bottom-0 end-0 m-3 px-3 py-2 rounded";
-  t.style.cssText = "background:#1f6feb;color:#fff;font-size:.8rem;z-index:9999";
+  t.style.cssText = `background:${bg};color:#fff;font-size:.8rem;z-index:9999`;
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(()=>t.remove(), 3500);

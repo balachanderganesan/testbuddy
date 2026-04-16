@@ -99,6 +99,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 logging.getLogger("paramiko.transport").setLevel(logging.WARNING)  # suppress non-SSH banner noise
 
+# Prevents poll and rediscover from running concurrently (they write the same rows).
+_op_lock = threading.Lock()
+_op_name = ""   # human-readable name of whoever holds the lock
+
 app = Flask(__name__)
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -200,9 +204,9 @@ def _add_col_if_missing(conn, table, col_def):
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     try:
         yield conn
         conn.commit()
@@ -225,12 +229,25 @@ def purge_old_samples():
 def ssh_connect(host, port, username, password):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(
-        hostname=host, port=int(port),
-        username=username, password=password,
-        timeout=SSH_TIMEOUT, look_for_keys=False, allow_agent=False,
-        banner_timeout=SSH_TIMEOUT,
+    try:
+        ssh.connect(
+            hostname=host, port=int(port),
+            username=username, password=password,
+            timeout=SSH_TIMEOUT, look_for_keys=False, allow_agent=False,
+            banner_timeout=SSH_TIMEOUT,
+        )
+        return ssh
+    except paramiko.AuthenticationException:
+        pass
+    # Fallback: keyboard-interactive auth (Ubuntu/PAM servers often reject the
+    # 'password' SSH method but accept 'keyboard-interactive' with the same password).
+    t = paramiko.Transport((host, int(port)))
+    t.start_client(timeout=SSH_TIMEOUT)
+    t.auth_interactive_dumb(
+        username,
+        lambda title, instructions, prompts: [password] * len(prompts),
     )
+    ssh._transport = t
     return ssh
 
 
@@ -338,6 +355,19 @@ def discover_on_hypervisor(hv, known_types):
 
 
 def run_discovery(topology_id="chennai"):
+    global _op_name
+    if not _op_lock.acquire(blocking=False):
+        log.info(f"Discovery [{topology_id}] skipped — {_op_name} already running")
+        return
+    _op_name = f"discovery[{topology_id}]"
+    try:
+        _run_discovery(topology_id)
+    finally:
+        _op_lock.release()
+        _op_name = ""
+
+
+def _run_discovery(topology_id):
     topo = TOPOLOGIES.get(topology_id)
     if not topo:
         log.error(f"Unknown topology: {topology_id}")
@@ -656,6 +686,19 @@ def poll_device(device):
 
 
 def run_poll():
+    global _op_name
+    if not _op_lock.acquire(blocking=False):
+        log.info(f"Poll skipped — {_op_name} already running")
+        return
+    _op_name = "poll"
+    try:
+        _run_poll()
+    finally:
+        _op_lock.release()
+        _op_name = ""
+
+
+def _run_poll():
     with get_db() as conn:
         # Join hypervisors so poll_device gets hypervisor_ip
         devices = [dict(r) for r in conn.execute("""
@@ -1119,6 +1162,8 @@ def api_rediscover():
     tid = request.args.get("topology", "chennai")
     if tid not in TOPOLOGIES:
         tid = "chennai"
+    if _op_lock.locked():
+        return jsonify({"status": "busy", "reason": _op_name + " already running"}), 409
     threading.Thread(target=run_discovery, args=(tid,), daemon=True).start()
     return jsonify({"status": "discovery started", "topology": tid})
 
@@ -1133,6 +1178,8 @@ def api_topologies():
 
 @app.route("/api/poll_now", methods=["POST"])
 def api_poll_now():
+    if _op_lock.locked():
+        return jsonify({"status": "busy", "reason": _op_name + " already running"}), 409
     threading.Thread(target=run_poll, daemon=True).start()
     return jsonify({"status": "poll started"})
 
