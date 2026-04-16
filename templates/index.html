@@ -96,6 +96,29 @@
     .sc-pill.active { background:#1f6feb; border-color:#1f6feb; color:#fff; }
     .topo-label { font-size:.72rem; color:#58a6ff; padding:.25rem 1.5rem .1rem;
                   background:#161b22; border-bottom:1px solid #21262d; }
+
+    /* Recording indicator */
+    @keyframes rec-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(1.3)} }
+    .rec-dot { display:inline-block; width:8px; height:8px; border-radius:50%;
+               background:#f85149; animation:rec-pulse 1.2s infinite; margin-right:4px; }
+
+    /* Reports panel */
+    #reportsPanel { display:none; }
+    .report-card { background:#161b22; border:1px solid #30363d; border-radius:8px;
+                   padding:.85rem 1.1rem; margin-bottom:.6rem; cursor:pointer;
+                   transition:border-color .15s; }
+    .report-card:hover { border-color:#58a6ff; }
+    .report-duration { font-size:.72rem; color:#8b949e; }
+    .rec-select { font-size:.78rem; max-width:220px; background:#1c2128;
+                  border-color:#30363d; color:#c9d1d9; }
+    .rec-select:focus { border-color:#1f6feb; box-shadow:none; }
+    .live-badge { background:#3c0d0d; color:#f85149; border:1px solid #5c1a1a;
+                  border-radius:4px; font-size:.68rem; padding:.1rem .4rem; }
+    .core-alert-banner { background:#3c0d0d; border:1px solid #f85149; border-radius:8px;
+                         padding:.65rem 1rem; margin-bottom:.75rem; font-size:.82rem; }
+    .active-rec-card { background:#161b22; border:1px solid #f85149; border-radius:8px;
+                       padding:.75rem 1rem; margin-bottom:.5rem; cursor:pointer; }
+    .active-rec-card:hover { border-color:#ff7b72; }
   </style>
 </head>
 <body>
@@ -113,6 +136,27 @@
       <button class="btn btn-sm btn-outline-primary" onclick="triggerPollNow()">
         <i class="bi bi-lightning me-1"></i>Poll Now
       </button>
+      <div class="d-flex align-items-center gap-2" style="border-left:1px solid #30363d;padding-left:.75rem">
+        <select id="recTopoSelect" class="form-select form-select-sm rec-select"
+                title="Select testbed to record" onchange="onRecTopoChange()">
+          <option value="">Loading…</option>
+        </select>
+        <select id="recIntervalSelect" class="form-select form-select-sm rec-select"
+                style="max-width:90px" title="Recording sample interval">
+          <option value="30">30 s</option>
+          <option value="60">1 min</option>
+          <option value="120">2 min</option>
+          <option value="300" selected>5 min</option>
+          <option value="600">10 min</option>
+        </select>
+        <span id="recIndicator" style="display:none;font-size:.75rem;color:#f85149;white-space:nowrap">
+          <span class="rec-dot"></span>REC
+        </span>
+        <button id="recBtn" class="btn btn-sm btn-outline-danger" onclick="toggleRecording()"
+                style="white-space:nowrap">
+          <i class="bi bi-record-circle me-1"></i>Record
+        </button>
+      </div>
     </div>
   </div>
 </nav>
@@ -137,6 +181,12 @@
         <button class="nav-link" id="mainTabStandard"
                 onclick="switchMainTab('standard')">
           <i class="bi bi-router me-1"></i>Standard Testbeds
+        </button>
+      </li>
+      <li class="nav-item">
+        <button class="nav-link" id="mainTabReports"
+                onclick="switchMainTab('reports')">
+          <i class="bi bi-file-earmark-bar-graph me-1"></i>Reports
         </button>
       </li>
     </ul>
@@ -166,9 +216,58 @@
   </div>
   <div id="bastionList" class="d-flex flex-wrap gap-2"></div>
 </div>
+
+<!-- Reports panel -->
+<div id="reportsPanel" class="container-fluid px-4 mt-3">
+  <!-- Active recordings (live) -->
+  <div id="activeRecordingsSection" style="display:none;margin-bottom:1.25rem">
+    <h6 class="mb-2 text-danger fw-semibold">
+      <span class="rec-dot"></span>Active Recordings
+    </h6>
+    <div id="activeRecordingsList"></div>
+  </div>
+
+  <!-- Reports list view -->
+  <div id="reportsList">
+    <div class="d-flex align-items-center gap-3 mb-3 flex-wrap">
+      <h6 class="mb-0 text-info fw-semibold">
+        <i class="bi bi-file-earmark-bar-graph me-2"></i>Completed Reports
+      </h6>
+      <select id="reportTopoFilter" class="form-select form-select-sm rec-select"
+              onchange="loadReports()">
+        <option value="">All Topologies</option>
+        <option value="chennai">Chennai Solutions Topology</option>
+        <option value="sc_tb1">TB1</option>
+        <option value="sc_tb2">TB2</option>
+        <option value="sc_tb3">TB3</option>
+        <option value="sc_tb4">TB4</option>
+        <option value="sc_tb5">TB5</option>
+        <option value="standard_testbeds">Standard Testbeds</option>
+      </select>
+      <button class="btn btn-sm btn-outline-secondary ms-auto" onclick="loadReports()">
+        <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+      </button>
+    </div>
+    <div id="reportsListItems"></div>
+  </div>
+  <!-- Report detail view -->
+  <div id="reportDetail" style="display:none">
+    <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+      <button class="btn btn-sm btn-outline-secondary" onclick="closeReportDetail()">
+        <i class="bi bi-arrow-left me-1"></i>Back
+      </button>
+      <span id="reportDetailTitle" class="fw-bold" style="font-size:.9rem"></span>
+      <a id="reportDownloadBtn" href="#" class="btn btn-sm btn-outline-primary ms-auto">
+        <i class="bi bi-download me-1"></i>Download HTML
+      </a>
+    </div>
+    <div id="reportDetailContent"></div>
+  </div>
+</div>
+
 <div class="topo-label" id="topoLabel"></div>
 
-<div class="container-fluid px-4">
+<div class="container-fluid px-4" id="mainContent">
 
   <!-- Summary cards -->
   <div class="row g-3 mb-4">
@@ -330,6 +429,11 @@ let activeCorePopover = null;
 let activeCoreElement = null;
 const bsModal = new bootstrap.Modal(document.getElementById("deviceModal"));
 
+// Recording + Reports state
+let isRecording    = false;   // true when recTopoSelect's topology is recording
+let activeReportId = null;
+const reportCharts = {};
+
 // ── Topology switching ────────────────────────────────────────────────────────
 const SC_TOPO_IDS = ["sc_tb1","sc_tb2","sc_tb3","sc_tb4","sc_tb5"];
 const TOPO_LABELS = {
@@ -345,11 +449,24 @@ const TOPO_LABELS = {
 function switchMainTab(which) {
   const isSC       = which === "sc";
   const isStandard = which === "standard";
+  const isReports  = which === "reports";
+
   document.getElementById("mainTabChennai").classList.toggle("active", which === "chennai");
   document.getElementById("mainTabSC").classList.toggle("active", isSC);
   document.getElementById("mainTabStandard").classList.toggle("active", isStandard);
+  document.getElementById("mainTabReports").classList.toggle("active", isReports);
+
   document.getElementById("scSubNav").style.display           = isSC       ? "block" : "none";
   document.getElementById("standardSetupPanel").style.display = isStandard ? "block" : "none";
+  document.getElementById("reportsPanel").style.display       = isReports  ? "block" : "none";
+  document.getElementById("mainContent").style.display        = isReports  ? "none"  : "block";
+  document.getElementById("topoLabel").style.display          = isReports  ? "none"  : "block";
+
+  if (isReports) {
+    loadReports();
+    return;
+  }
+
   if (isSC) {
     if (!SC_TOPO_IDS.includes(currentTopology)) {
       currentTopology = "sc_tb1";
@@ -360,6 +477,14 @@ function switchMainTab(which) {
     loadBastionHosts();
   } else {
     currentTopology = "chennai";
+  }
+  // Sync recording dropdown to current topology tab
+  const sel = document.getElementById("recTopoSelect");
+  if (sel && currentTopology !== "standard_testbeds") {
+    if (sel.querySelector(`option[value="${currentTopology}"]`)) {
+      sel.value = currentTopology;
+      checkRecordingStatus();
+    }
   }
   document.getElementById("topoLabel").textContent = TOPO_LABELS[currentTopology] || "";
   refreshAll();
@@ -880,6 +1005,118 @@ async function triggerPollNow() {
   toast("Poll triggered");
   setTimeout(refreshAll, 8000);
 }
+
+// ── Recording ─────────────────────────────────────────────────────────────────
+
+async function loadRecordingOptions() {
+  const sel = document.getElementById("recTopoSelect");
+  const options = await fetch("/api/recording/options").then(r => r.json()).catch(() => []);
+  sel.innerHTML = "";
+  // Group by "group" field
+  const groups = {};
+  options.forEach(o => {
+    (groups[o.group] = groups[o.group] || []).push(o);
+  });
+  Object.entries(groups).forEach(([grp, opts]) => {
+    const og = document.createElement("optgroup");
+    og.label = grp;
+    opts.forEach(o => {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label + (o.device_count != null ? ` (${o.device_count} dev)` : "");
+      og.appendChild(opt);
+    });
+    sel.appendChild(og);
+  });
+  // Default to current topology tab if possible
+  const cur = currentTopology.startsWith("sc_") || currentTopology === "chennai" ? currentTopology : null;
+  if (cur) sel.value = cur;
+  onRecTopoChange();
+}
+
+function onRecTopoChange() {
+  checkRecordingStatus();
+  // Toggle interval select — hide for standard_testbeds whole-topo (but show for bastions)
+  const val = document.getElementById("recTopoSelect").value;
+  document.getElementById("recIntervalSelect").style.display = val ? "block" : "none";
+}
+
+async function checkRecordingStatus() {
+  const tid = document.getElementById("recTopoSelect").value;
+  if (!tid) return;
+  try {
+    const res = await fetch(`/api/recording/status?topology=${encodeURIComponent(tid)}`).then(r => r.json());
+    isRecording = res.recording;
+    // Sync interval select to current recording's interval
+    if (isRecording && res.session?.poll_interval_sec) {
+      const sel = document.getElementById("recIntervalSelect");
+      sel.value = String(res.session.poll_interval_sec);
+      sel.disabled = true;   // can't change interval of active recording
+    } else {
+      document.getElementById("recIntervalSelect").disabled = false;
+    }
+    _updateRecBtn();
+  } catch (e) { /* ignore */ }
+}
+
+function _updateRecBtn() {
+  const btn = document.getElementById("recBtn");
+  const dot = document.getElementById("recIndicator");
+  if (isRecording) {
+    btn.innerHTML = '<i class="bi bi-stop-circle me-1"></i>Stop';
+    btn.classList.remove("btn-outline-danger");
+    btn.classList.add("btn-danger");
+    dot.style.display = "inline-flex";
+    dot.style.alignItems = "center";
+  } else {
+    btn.innerHTML = '<i class="bi bi-record-circle me-1"></i>Record';
+    btn.classList.remove("btn-danger");
+    btn.classList.add("btn-outline-danger");
+    dot.style.display = "none";
+  }
+}
+
+async function toggleRecording() {
+  const tid      = document.getElementById("recTopoSelect").value;
+  const tname    = document.getElementById("recTopoSelect").selectedOptions[0]?.text || tid;
+  const interval = parseInt(document.getElementById("recIntervalSelect").value) || 300;
+  if (!tid) return;
+
+  if (isRecording) {
+    const r = await fetch("/api/recording/stop", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({topology: tid}),
+    }).then(r => r.json());
+    isRecording = false;
+    document.getElementById("recIntervalSelect").disabled = false;
+    _updateRecBtn();
+    toast(`Recording stopped — ${r.sample_count || 0} samples, ${r.device_count || 0} devices`);
+    // Refresh reports if the tab is open
+    if (document.getElementById("reportsPanel").style.display !== "none") loadReports();
+  } else {
+    const label = prompt(`Label for this recording (optional):\n${tname}`, "") ?? null;
+    if (label === null) return; // cancelled
+    const r = await fetch("/api/recording/start", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({topology: tid, label: label.trim(), poll_interval_sec: interval}),
+    }).then(r => r.json());
+    if (r.error === "already_recording") {
+      toast("Already recording for this testbed");
+      isRecording = true;
+      document.getElementById("recIntervalSelect").disabled = true;
+      _updateRecBtn();
+      return;
+    }
+    isRecording = true;
+    document.getElementById("recIntervalSelect").disabled = true;
+    _updateRecBtn();
+    const intLabel = interval < 60 ? `${interval}s` : `${interval/60}min`;
+    toast(`Recording started for ${tname.split("(")[0].trim()} (every ${intLabel})`);
+  }
+}
+
 function toast(msg) {
   const t = document.createElement("div");
   t.className = "position-fixed bottom-0 end-0 m-3 px-3 py-2 rounded";
@@ -917,6 +1154,7 @@ async function deleteBastionHost(hvId, name) {
   if (!confirm(`Delete "${name}" and all its devices from the dashboard?`)) return;
   await fetch(`/api/bastion/${hvId}`, {method: "DELETE"});
   loadBastionHosts();
+  loadRecordingOptions();
   refreshAll();
 }
 
@@ -951,7 +1189,7 @@ async function addBastionHost() {
       document.getElementById("bastionUser").value = "";
       document.getElementById("bastionPass").value = "";
       loadBastionHosts();
-      setTimeout(refreshAll, 10000);
+      setTimeout(() => { loadRecordingOptions(); refreshAll(); }, 10000);
     }
   } catch (e) {
     status.textContent = "Request failed";
@@ -959,10 +1197,372 @@ async function addBastionHost() {
   }
 }
 
+// ── Reports tab ───────────────────────────────────────────────────────────────
+let _liveRefreshTimer = null;
+
+async function loadReports() {
+  closeReportDetail();
+  await loadActiveRecordings();
+  const tid = document.getElementById("reportTopoFilter").value;
+  const url = tid ? `/api/reports?topology=${tid}` : "/api/reports";
+  const reports = await fetch(url).then(r => r.json());
+  renderReportsList(reports);
+}
+
+async function loadActiveRecordings() {
+  const active = await fetch("/api/recording/active").then(r => r.json()).catch(() => []);
+  const sec  = document.getElementById("activeRecordingsSection");
+  const list = document.getElementById("activeRecordingsList");
+  if (!active.length) {
+    sec.style.display = "none";
+    list.innerHTML = "";
+    return;
+  }
+  sec.style.display = "block";
+  list.innerHTML = active.map(r => {
+    const dur  = _recElapsed(r.started_at);
+    const intv = r.poll_interval_sec < 60 ? `${r.poll_interval_sec}s` : `${r.poll_interval_sec/60}min`;
+    const lbl  = r.label ? `<strong class="me-1">${r.label}</strong>` : "";
+    return `
+    <div class="active-rec-card" onclick="openLiveReportDetail(${r.id})">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <span class="rec-dot"></span>
+        ${lbl}<span class="fw-semibold">${r.display_label}</span>
+        <span class="text-muted" style="font-size:.75rem">
+          <i class="bi bi-clock me-1"></i>${dur} elapsed
+          &nbsp;·&nbsp;<i class="bi bi-stopwatch me-1"></i>every ${intv}
+        </span>
+        <span class="ms-auto badge badge-ok" style="font-size:.65rem">LIVE</span>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function _recElapsed(startIso) {
+  try {
+    const ms  = Date.now() - new Date(startIso.endsWith("Z") ? startIso : startIso + "Z").getTime();
+    const sec = Math.floor(ms / 1000);
+    return fmtDuration(sec);
+  } catch { return "?"; }
+}
+
+function renderReportsList(reports) {
+  const el = document.getElementById("reportsListItems");
+  if (!reports.length) {
+    el.innerHTML = '<div class="text-muted text-center py-5">' +
+      'No recordings yet. Use the <strong>Record</strong> button in the toolbar to start one.</div>';
+    return;
+  }
+  el.innerHTML = reports.map(r => {
+    const dur = fmtDuration(r.duration_sec);
+    const statusBadge = r.status === "complete"
+      ? '<span class="badge badge-ok" style="font-size:.65rem">COMPLETE</span>'
+      : '<span class="badge badge-no_data" style="font-size:.65rem">EMPTY</span>';
+    const labelHtml = r.label
+      ? `<strong class="me-1">${r.label}</strong>` : "";
+    return `
+    <div class="report-card" onclick="openReportDetail(${r.id})">
+      <div class="d-flex align-items-start justify-content-between gap-2 flex-wrap">
+        <div>
+          <div class="mb-1 d-flex align-items-center gap-2 flex-wrap">
+            ${labelHtml}${statusBadge}
+            <span class="badge bg-secondary" style="font-size:.65rem">${r.topology_label}</span>
+          </div>
+          <div class="report-duration">
+            <i class="bi bi-calendar3 me-1"></i>${fmtTime(r.started_at)}
+            <span class="mx-1 text-muted">→</span>${fmtTime(r.stopped_at)}
+            <span class="ms-2"><i class="bi bi-clock me-1"></i>${dur}</span>
+          </div>
+        </div>
+        <div class="d-flex align-items-center gap-3">
+          <div class="text-center">
+            <div style="font-size:1rem;font-weight:700;color:#58a6ff">${r.sample_count}</div>
+            <div style="font-size:.65rem;color:#8b949e">samples</div>
+          </div>
+          <div class="text-center">
+            <div style="font-size:1rem;font-weight:700;color:#3fb950">${r.device_count}</div>
+            <div style="font-size:.65rem;color:#8b949e">devices</div>
+          </div>
+          <a href="/api/reports/${r.id}/download" class="btn btn-sm btn-outline-primary"
+             onclick="event.stopPropagation()" title="Download standalone HTML report">
+            <i class="bi bi-download"></i>
+          </a>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function fmtDuration(sec) {
+  if (!sec || sec < 0) return "0s";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function fmtTime(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+    return d.toLocaleString(undefined, {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+  } catch { return iso.slice(0,16).replace("T"," "); }
+}
+
+async function openLiveReportDetail(reportId) {
+  // Open live view — same as openReportDetail but uses /live endpoint + auto-refreshes
+  await _openReportDetailImpl(reportId, true);
+}
+
+async function openReportDetail(reportId) {
+  await _openReportDetailImpl(reportId, false);
+}
+
+async function _openReportDetailImpl(reportId, preferLive) {
+  // Cancel any previous live refresh timer
+  if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
+
+  activeReportId = reportId;
+  document.getElementById("reportsList").style.display = "none";
+  document.getElementById("reportDetail").style.display = "block";
+  document.getElementById("reportDetailContent").innerHTML =
+    '<div class="text-muted text-center py-5">' +
+    '<span class="spinner-border spinner-border-sm me-2"></span>Loading…</div>';
+
+  const endpoint = preferLive ? `/api/reports/${reportId}/live` : `/api/reports/${reportId}/data`;
+  const data = await fetch(endpoint).then(r => r.json());
+  if (data.error) {
+    document.getElementById("reportDetailContent").innerHTML =
+      `<div class="text-danger p-3">${data.error}</div>`;
+    return;
+  }
+
+  _applyReportDetailData(data);
+
+  // Auto-refresh live sessions every 15 s
+  if (data.is_live) {
+    _liveRefreshTimer = setInterval(async () => {
+      if (activeReportId !== reportId) { clearInterval(_liveRefreshTimer); return; }
+      const fresh = await fetch(`/api/reports/${reportId}/live`).then(r => r.json()).catch(() => null);
+      if (fresh && !fresh.error) _applyReportDetailData(fresh);
+    }, 15000);
+  }
+}
+
+function _applyReportDetailData(data) {
+  const s = data.session;
+  const titleLabel = s.label ? `"${s.label}" — ` : "";
+  const liveTag    = data.is_live
+    ? ' <span class="live-badge ms-1"><span class="rec-dot"></span>LIVE</span>' : "";
+  document.getElementById("reportDetailTitle").innerHTML =
+    `${titleLabel}${data.topology_label}${liveTag} · ${fmtTime(s.started_at)}` +
+    (data.is_live ? "" : ` → ${fmtTime(s.stopped_at)}`);
+  document.getElementById("reportDownloadBtn").href = `/api/reports/${s.id}/download`;
+  document.getElementById("reportDownloadBtn").style.display = data.is_live ? "none" : "";
+
+  // Destroy old charts before re-rendering
+  Object.values(reportCharts).forEach(c => c.destroy());
+  Object.keys(reportCharts).forEach(k => delete reportCharts[k]);
+
+  const el = document.getElementById("reportDetailContent");
+
+  // Coredump alert banner
+  let alertBanner = "";
+  if (data.core_alerts && data.core_alerts.length > 0) {
+    const alerts = data.core_alerts.map(a =>
+      `<div><i class="bi bi-bug-fill text-danger me-2"></i>` +
+      `<strong>${a.device_name}</strong> (${a.ip}) — ` +
+      `${a.core_count} core dump${a.core_count > 1 ? "s" : ""} detected` +
+      (a.first_seen ? ` at ${fmtTime(a.first_seen)}` : "") + `</div>`
+    ).join("");
+    alertBanner = `
+    <div class="core-alert-banner">
+      <div class="fw-bold mb-1 text-danger">
+        <i class="bi bi-exclamation-triangle-fill me-2"></i>Core Dump Alert
+      </div>
+      ${alerts}
+    </div>`;
+  }
+
+  el.innerHTML = alertBanner + (data.devices.length === 0
+    ? '<div class="text-muted text-center py-4">No device data captured yet.</div>'
+    : "");
+
+  if (data.devices.length > 0) {
+    // Re-use renderReportDetail but append to existing content
+    const tmp = document.createElement("div");
+    document.getElementById("reportDetailContent").appendChild(tmp);
+    renderReportDetail(data, tmp);
+  }
+}
+
+function _statCard(label, val, color) {
+  const style = color ? `style="color:${color}"` : "";
+  return `<div class="col-6 col-md-4 col-lg-2">
+    <div class="stat-card" style="padding:.6rem .9rem">
+      <div class="label">${label}</div>
+      <div class="value" style="font-size:1.1rem" ${style}>${val ?? "—"}</div>
+    </div>
+  </div>`;
+}
+
+function _fmtMB(kb) {
+  if (kb == null) return "—";
+  return (kb / 1024).toFixed(0) + " MB";
+}
+
+function _freeColor(pct) {
+  if (pct == null) return undefined;
+  if (pct < CRIT_FREE_PCT) return "#f85149";
+  if (pct < WARN_FREE_PCT) return "#d29922";
+  return "#3fb950";
+}
+
+function renderReportDetail(data, container) {
+  const el = container || document.getElementById("reportDetailContent");
+  if (!data.devices.length) {
+    el.innerHTML = '<div class="text-muted text-center py-4">No device data in this recording window.</div>';
+    return;
+  }
+  el.innerHTML = data.devices.map(dev => {
+    const name     = dev.vm_name || dev.ip;
+    const sm       = dev.summary;
+    const total    = sm.mem_total_kb || 1;
+    const minPct   = sm.mem_free_min_kb != null ? sm.mem_free_min_kb / total * 100 : null;
+    const typeIcon = dev.device_type === "edge"
+      ? '<i class="bi bi-cpu text-primary me-1"></i>'
+      : '<i class="bi bi-diagram-3 text-success me-1"></i>';
+    const coreBadge = sm.core_count_max > 0
+      ? `<span class="badge badge-critical ms-1" style="font-size:.65rem">` +
+        `<i class="bi bi-bug-fill me-1"></i>${sm.core_count_max} cores</span>` : "";
+    return `
+    <div class="tbl-wrap mb-4">
+      <div class="p-3 pb-2">
+        <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+          <h6 class="mb-0">${typeIcon}${name}${coreBadge}</h6>
+          <code class="text-muted" style="font-size:.72rem">${dev.ip}</code>
+          <span class="text-muted" style="font-size:.72rem">${dev.hypervisor_name}</span>
+          <span class="badge bg-secondary ms-auto" style="font-size:.65rem">${sm.sample_count} samples</span>
+        </div>
+        <div class="row g-2">
+          ${_statCard("Total RAM",   _fmtMB(sm.mem_total_kb))}
+          ${_statCard("Free (min)",  _fmtMB(sm.mem_free_min_kb), _freeColor(minPct))}
+          ${_statCard("Free (avg)",  _fmtMB(sm.mem_free_avg_kb))}
+          ${_statCard("CPU avg",     sm.cpu_pct_avg != null ? sm.cpu_pct_avg.toFixed(1) + "%" : "—")}
+          ${_statCard("CPU peak",    sm.cpu_pct_max != null ? sm.cpu_pct_max.toFixed(1) + "%" : "—")}
+          ${_statCard("HA up",       sm.ha_reachable_pct != null ? sm.ha_reachable_pct.toFixed(0) + "%" : "—")}
+        </div>
+      </div>
+      <div class="px-3 pb-3">
+        <div class="chart-wrap" style="height:220px">
+          <canvas id="reportChart_${dev.id}"></canvas>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  setTimeout(() => data.devices.forEach(dev => buildReportChart(dev)), 50);
+}
+
+function buildReportChart(dev) {
+  const ctx = document.getElementById(`reportChart_${dev.id}`)?.getContext("2d");
+  if (!ctx) return;
+  const samples  = dev.samples;
+  const labels   = samples.map(s => new Date(s.ts.endsWith("Z") ? s.ts : s.ts + "Z"));
+  const freeMB   = samples.map(s => s.mem_free_kb      != null ? s.mem_free_kb / 1024      : null);
+  const availMB  = samples.map(s => s.mem_available_kb != null ? s.mem_available_kb / 1024 : null);
+  const haFreeMB = samples.map(s => s.ha_reachable && s.ha_mem_free_kb != null
+                                    ? s.ha_mem_free_kb / 1024 : null);
+  const hasHA    = haFreeMB.some(v => v != null);
+  const maxTotal = Math.max(...samples.filter(s => s.mem_total_kb).map(s => s.mem_total_kb / 1024), 1);
+  const warnMB   = maxTotal * (WARN_FREE_PCT / 100);
+  const critMB   = maxTotal * (CRIT_FREE_PCT / 100);
+  const ptRadius = samples.length > 60 ? 0 : 2;
+
+  const datasets = [
+    { label: "Free",      data: freeMB,  borderColor: "#1f6feb",
+      backgroundColor: "rgba(31,111,235,.09)", fill: true,
+      tension: .3, pointRadius: ptRadius, borderWidth: 2 },
+    { label: "Available", data: availMB, borderColor: "#3fb950",
+      backgroundColor: "transparent", borderDash: [5,3],
+      tension: .3, pointRadius: 0, borderWidth: 1.5 },
+  ];
+  if (hasHA) datasets.push({
+    label: "HA Free", data: haFreeMB, borderColor: "#58a6ff",
+    backgroundColor: "transparent", borderDash: [8,4],
+    tension: .3, pointRadius: 0, borderWidth: 1.5,
+  });
+
+  const chart = new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { labels: { color: "#8b949e", font: { size: 10 }, boxWidth: 12 } },
+        tooltip: {
+          backgroundColor: "#1c2128", borderColor: "#30363d", borderWidth: 1,
+          titleColor: "#c9d1d9", bodyColor: "#8b949e",
+          callbacks: {
+            label: c => ` ${c.dataset.label}: ${c.parsed.y != null ? c.parsed.y.toFixed(0) + " MB" : "—"}`,
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: "time", grid: { color: "#21262d" },
+          ticks: { color: "#8b949e", maxTicksLimit: 8, font: { size: 9 } },
+          time: { displayFormats: { minute: "HH:mm", hour: "MMM d HH:mm", day: "MMM d" } },
+        },
+        y: {
+          title: { display: true, text: "Memory (MB)", color: "#8b949e", font: { size: 10 } },
+          grid: { color: "#21262d" },
+          ticks: { color: "#8b949e", font: { size: 10 } },
+          min: 0,
+        },
+      },
+    },
+    plugins: [{
+      id: "thresholds",
+      afterDraw(chart) {
+        const { ctx: c, chartArea: { left, right }, scales: { y } } = chart;
+        [[warnMB, "#d29922", "WARN"], [critMB, "#f85149", "CRIT"]].forEach(([yv, col, lbl]) => {
+          const yp = y.getPixelForValue(yv);
+          c.save(); c.beginPath(); c.setLineDash([6, 4]);
+          c.strokeStyle = col; c.lineWidth = 1;
+          c.moveTo(left, yp); c.lineTo(right, yp); c.stroke();
+          c.fillStyle = col; c.font = "9px monospace";
+          c.fillText(lbl, left + 4, yp - 3); c.restore();
+        });
+      }
+    }]
+  });
+  reportCharts[dev.id] = chart;
+}
+
+function closeReportDetail() {
+  if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
+  Object.values(reportCharts).forEach(c => c.destroy());
+  Object.keys(reportCharts).forEach(k => delete reportCharts[k]);
+  document.getElementById("reportDetail").style.display = "none";
+  document.getElementById("reportsList").style.display = "block";
+  activeReportId = null;
+}
+
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
 async function refreshAll() {
   await Promise.all([loadSummary(), loadAlerts(), loadDevices()]);
+  checkRecordingStatus();
+  // Refresh active-recordings section if Reports tab is visible
+  if (document.getElementById("reportsPanel").style.display !== "none" && activeReportId === null) {
+    loadActiveRecordings();
+  }
 }
+// Initial load
+loadRecordingOptions();
 refreshAll();
 setInterval(refreshAll, POLL_INTERVAL);
 </script>

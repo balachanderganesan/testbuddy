@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import paramiko
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, Response
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 BASE_DIR     = Path(__file__).parent
@@ -157,8 +157,26 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_ms_dev_ts
                 ON memory_samples(device_id, ts DESC);
+
+            CREATE TABLE IF NOT EXISTS recording_sessions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                topology_id  TEXT    NOT NULL,
+                label        TEXT    NOT NULL DEFAULT '',
+                started_at   TEXT    NOT NULL,
+                stopped_at   TEXT,
+                status       TEXT    NOT NULL DEFAULT 'recording',
+                sample_count INTEGER DEFAULT 0,
+                device_count INTEGER DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_rs_topology
+                ON recording_sessions(topology_id, started_at DESC);
         """)
         # Migrate existing DB: add new columns if absent
+        _add_col_if_missing(conn, "recording_sessions", "poll_interval_sec INTEGER DEFAULT 300")
+        _add_col_if_missing(conn, "recording_sessions", "last_polled_at TEXT")
+        _add_col_if_missing(conn, "recording_sessions", "hypervisor_id INTEGER")
+        _add_col_if_missing(conn, "recording_sessions", "core_alerts TEXT DEFAULT '[]'")
         _add_col_if_missing(conn, "devices", "vm_name TEXT")
         _add_col_if_missing(conn, "devices", "core_files TEXT")
         _add_col_if_missing(conn, "devices", "ha_core_files TEXT")
@@ -749,6 +767,175 @@ def get_device_status(device_id):
     }
 
 
+# ── Report data builder ───────────────────────────────────────────────────────
+
+def _build_report_data(session_id):
+    """Aggregate memory_samples for all devices in a recording window.
+    Works for both completed and active (still-recording) sessions.
+    """
+    with get_db() as conn:
+        session = conn.execute(
+            "SELECT * FROM recording_sessions WHERE id=?", (session_id,)
+        ).fetchone()
+        if not session:
+            return None
+        session = dict(session)
+        tid    = session["topology_id"]
+        start  = session["started_at"]
+        # For active sessions, use current time as the window end
+        stop   = session["stopped_at"] or datetime.utcnow().isoformat()
+        hv_id  = session.get("hypervisor_id")
+
+        # Device filter: specific hypervisor (per-bastion) or whole topology
+        if hv_id:
+            where_clause = "d.hypervisor_id=?"
+            where_args   = (hv_id, start, stop)
+            hv_row = conn.execute(
+                "SELECT name FROM hypervisors WHERE id=?", (hv_id,)
+            ).fetchone()
+            topo_label = hv_row["name"] if hv_row else str(hv_id)
+        else:
+            where_clause = "h.topology_id=?"
+            where_args   = (tid, start, stop)
+            topo_label   = TOPOLOGIES.get(tid, {}).get("label", tid)
+
+        devices = [dict(r) for r in conn.execute(f"""
+            SELECT DISTINCT d.id, d.device_type, d.ip, d.vm_name, h.name AS hypervisor_name
+            FROM memory_samples ms
+            JOIN devices d ON ms.device_id = d.id
+            JOIN hypervisors h ON d.hypervisor_id = h.id
+            WHERE {where_clause} AND ms.ts>=? AND ms.ts<=?
+            ORDER BY d.device_type, h.name, d.ip
+        """, where_args).fetchall()]
+
+        result_devices = []
+        for dev in devices:
+            samples = [dict(r) for r in conn.execute("""
+                SELECT ts, mem_total_kb, mem_free_kb, mem_available_kb, cpu_pct,
+                       ha_reachable, ha_mem_free_kb, ha_mem_total_kb, ha_cpu_pct, core_count
+                FROM memory_samples
+                WHERE device_id=? AND ts>=? AND ts<=?
+                ORDER BY ts ASC
+            """, (dev["id"], start, stop)).fetchall()]
+            if not samples:
+                continue
+
+            frees  = [s["mem_free_kb"] for s in samples if s["mem_free_kb"] is not None]
+            cpus   = [s["cpu_pct"]     for s in samples if s["cpu_pct"]     is not None]
+            ha_pct = sum(1 for s in samples if s.get("ha_reachable")) / len(samples) * 100
+
+            dev["summary"] = {
+                "mem_total_kb":     samples[-1]["mem_total_kb"],
+                "mem_free_min_kb":  min(frees) if frees else None,
+                "mem_free_max_kb":  max(frees) if frees else None,
+                "mem_free_avg_kb":  int(sum(frees) / len(frees)) if frees else None,
+                "cpu_pct_avg":      round(sum(cpus) / len(cpus), 1) if cpus else None,
+                "cpu_pct_max":      round(max(cpus), 1) if cpus else None,
+                "ha_reachable_pct": round(ha_pct, 1),
+                "core_count_max":   max((s["core_count"] or 0) for s in samples),
+                "sample_count":     len(samples),
+                "first_ts":         samples[0]["ts"],
+                "last_ts":          samples[-1]["ts"],
+            }
+            dev["samples"] = samples
+            result_devices.append(dev)
+
+    # Compute coredump alerts from sample data (no extra DB column needed)
+    core_alerts = []
+    for dev in result_devices:
+        if dev["summary"]["core_count_max"] > 0:
+            # Find first sample where cores appeared
+            first_core_ts = next(
+                (s["ts"] for s in dev["samples"] if (s["core_count"] or 0) > 0), None
+            )
+            core_alerts.append({
+                "device_name": dev.get("vm_name") or dev["ip"],
+                "ip":          dev["ip"],
+                "core_count":  dev["summary"]["core_count_max"],
+                "first_seen":  first_core_ts,
+            })
+
+    return {
+        "session":        session,
+        "topology_label": topo_label,
+        "is_live":        session["status"] == "recording",
+        "window_end":     stop,
+        "devices":        result_devices,
+        "core_alerts":    core_alerts,
+    }
+
+
+# ── Recording poll manager ────────────────────────────────────────────────────
+# Tracks the unix timestamp of the last poll per recording session id.
+_rec_last_polled: dict = {}
+
+
+def _poll_recording_devices(session: dict):
+    """Poll devices for one active recording at its custom rate."""
+    tid   = session["topology_id"]
+    hv_id = session.get("hypervisor_id")
+    sid   = session["id"]
+
+    with get_db() as conn:
+        if hv_id:
+            devices = [dict(r) for r in conn.execute("""
+                SELECT d.*, h.ip AS hypervisor_ip
+                FROM devices d JOIN hypervisors h ON d.hypervisor_id = h.id
+                WHERE d.hypervisor_id=?
+            """, (hv_id,)).fetchall()]
+        else:
+            devices = [dict(r) for r in conn.execute("""
+                SELECT d.*, h.ip AS hypervisor_ip
+                FROM devices d JOIN hypervisors h ON d.hypervisor_id = h.id
+                WHERE h.topology_id=?
+                  AND NOT (d.console_port >= 2200 AND d.console_port <= 2299)
+            """, (tid,)).fetchall()]
+
+    if not devices:
+        return
+
+    log.info(f"[REC {sid}] Polling {len(devices)} devices (interval={session['poll_interval_sec']}s)")
+    with ThreadPoolExecutor(max_workers=min(len(devices), POLL_WORKERS)) as pool:
+        for d in devices:
+            pool.submit(poll_device, d)
+
+    # Update last_polled_at timestamp in DB
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE recording_sessions SET last_polled_at=? WHERE id=?",
+            (now, sid)
+        )
+
+
+def recording_poll_manager():
+    """Background thread: drives custom-rate polling for all active recordings."""
+    while True:
+        try:
+            with get_db() as conn:
+                active = [dict(r) for r in conn.execute(
+                    "SELECT * FROM recording_sessions WHERE status='recording'"
+                ).fetchall()]
+
+            now = time.time()
+            for session in active:
+                sid      = session["id"]
+                interval = session.get("poll_interval_sec") or POLL_INTERVAL
+                last     = _rec_last_polled.get(sid, 0)
+
+                if now - last >= interval:
+                    _rec_last_polled[sid] = now
+                    threading.Thread(
+                        target=_poll_recording_devices,
+                        args=(session,),
+                        daemon=True,
+                    ).start()
+        except Exception as exc:
+            log.error(f"Recording poll manager error: {exc}")
+
+        time.sleep(10)   # wake up every 10 s to check due recordings
+
+
 # ── Background scheduler ──────────────────────────────────────────────────────
 
 def background_loop():
@@ -991,6 +1178,278 @@ def api_bastion_delete(hv_id):
     return jsonify({"status": "deleted", "id": hv_id})
 
 
+# ── Recording API ─────────────────────────────────────────────────────────────
+
+@app.route("/api/recording/options")
+def api_recording_options():
+    """Return all recordable targets: topologies + individual bastion hosts."""
+    options = []
+    for tid, t in TOPOLOGIES.items():
+        if tid == "standard_testbeds":
+            continue  # expanded as individual bastions below
+        options.append({"value": tid, "label": t["label"], "group": "Topology", "hypervisor_id": None})
+
+    with get_db() as conn:
+        bastions = [dict(r) for r in conn.execute("""
+            SELECT h.id, h.name, h.ip, h.reachable,
+                   COUNT(d.id) AS device_count
+            FROM hypervisors h
+            LEFT JOIN devices d ON d.hypervisor_id = h.id
+            WHERE h.topology_id = 'standard_testbeds'
+            GROUP BY h.id
+            ORDER BY h.name
+        """).fetchall()]
+    for b in bastions:
+        display = b["name"] if b["name"] != b["ip"] else b["ip"]
+        options.append({
+            "value":        f"bastion_{b['id']}",
+            "label":        display,
+            "group":        "Standard Testbeds",
+            "hypervisor_id": b["id"],
+            "ip":           b["ip"],
+            "device_count": b["device_count"],
+            "reachable":    bool(b["reachable"]),
+        })
+    return jsonify(options)
+
+
+@app.route("/api/recording/start", methods=["POST"])
+def api_recording_start():
+    data             = request.get_json(force=True) or {}
+    raw_topology     = data.get("topology", "chennai")
+    label            = (data.get("label") or "").strip()
+    poll_interval    = int(data.get("poll_interval_sec", POLL_INTERVAL))
+    poll_interval    = max(30, min(poll_interval, 3600))   # clamp 30s–1h
+
+    # Support bastion_<id> synthetic topology values
+    hv_id = None
+    if raw_topology.startswith("bastion_"):
+        try:
+            hv_id = int(raw_topology.split("_", 1)[1])
+            tid   = "standard_testbeds"
+        except (IndexError, ValueError):
+            return jsonify({"error": "invalid topology"}), 400
+    else:
+        tid = raw_topology
+        if tid not in TOPOLOGIES:
+            return jsonify({"error": "unknown topology"}), 400
+
+    with get_db() as conn:
+        # One active recording per (topology, hypervisor_id)
+        if hv_id:
+            existing = conn.execute(
+                "SELECT id FROM recording_sessions WHERE hypervisor_id=? AND status='recording'",
+                (hv_id,)
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                "SELECT id FROM recording_sessions WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'",
+                (tid,)
+            ).fetchone()
+        if existing:
+            return jsonify({"error": "already_recording", "session_id": existing["id"]}), 409
+
+        now = datetime.utcnow().isoformat()
+        cur = conn.execute(
+            """INSERT INTO recording_sessions
+               (topology_id, hypervisor_id, label, started_at, status, poll_interval_sec, last_polled_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (tid, hv_id, label, now, "recording", poll_interval, now)
+        )
+        session_id = cur.lastrowid
+    return jsonify({
+        "id": session_id, "topology": tid, "hypervisor_id": hv_id,
+        "started_at": now, "status": "recording", "poll_interval_sec": poll_interval,
+    })
+
+
+@app.route("/api/recording/stop", methods=["POST"])
+def api_recording_stop():
+    data         = request.get_json(force=True) or {}
+    raw_topology = data.get("topology", "chennai")
+
+    hv_id = None
+    if raw_topology.startswith("bastion_"):
+        try:
+            hv_id = int(raw_topology.split("_", 1)[1])
+            tid   = "standard_testbeds"
+        except (IndexError, ValueError):
+            return jsonify({"error": "invalid topology"}), 400
+    else:
+        tid = raw_topology
+
+    with get_db() as conn:
+        if hv_id:
+            session = conn.execute(
+                "SELECT * FROM recording_sessions WHERE hypervisor_id=? AND status='recording'",
+                (hv_id,)
+            ).fetchone()
+        else:
+            session = conn.execute(
+                "SELECT * FROM recording_sessions WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'",
+                (tid,)
+            ).fetchone()
+        if not session:
+            return jsonify({"error": "no_active_recording"}), 404
+
+        now     = datetime.utcnow().isoformat()
+        sid     = session["id"]
+        started = session["started_at"]
+
+        if hv_id:
+            counts = conn.execute("""
+                SELECT COUNT(ms.id) AS sample_count,
+                       COUNT(DISTINCT ms.device_id) AS device_count
+                FROM memory_samples ms
+                JOIN devices d ON ms.device_id = d.id
+                WHERE d.hypervisor_id=? AND ms.ts>=? AND ms.ts<=?
+            """, (hv_id, started, now)).fetchone()
+        else:
+            counts = conn.execute("""
+                SELECT COUNT(ms.id) AS sample_count,
+                       COUNT(DISTINCT ms.device_id) AS device_count
+                FROM memory_samples ms
+                JOIN devices d ON ms.device_id = d.id
+                JOIN hypervisors h ON d.hypervisor_id = h.id
+                WHERE h.topology_id=? AND ms.ts>=? AND ms.ts<=?
+            """, (tid, started, now)).fetchone()
+
+        sc     = counts["sample_count"] if counts else 0
+        dc     = counts["device_count"] if counts else 0
+        status = "complete" if sc > 0 else "empty"
+        conn.execute(
+            "UPDATE recording_sessions SET stopped_at=?, status=?, sample_count=?, device_count=? WHERE id=?",
+            (now, status, sc, dc, sid)
+        )
+    return jsonify({
+        "id": sid, "topology": tid, "hypervisor_id": hv_id,
+        "started_at": started, "stopped_at": now,
+        "sample_count": sc, "device_count": dc, "status": status,
+    })
+
+
+@app.route("/api/recording/status")
+def api_recording_status():
+    raw = request.args.get("topology", "chennai")
+    hv_id = None
+    if raw.startswith("bastion_"):
+        try:
+            hv_id = int(raw.split("_", 1)[1])
+        except (IndexError, ValueError):
+            return jsonify({"recording": False, "session": None})
+    with get_db() as conn:
+        if hv_id:
+            row = conn.execute(
+                "SELECT id, started_at, label, poll_interval_sec FROM recording_sessions WHERE hypervisor_id=? AND status='recording'",
+                (hv_id,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id, started_at, label, poll_interval_sec FROM recording_sessions WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'",
+                (raw,)
+            ).fetchone()
+    if row:
+        return jsonify({"recording": True, "session": dict(row)})
+    return jsonify({"recording": False, "session": None})
+
+
+@app.route("/api/recording/active")
+def api_recording_active():
+    """Return all currently active recording sessions (across all topologies)."""
+    with get_db() as conn:
+        rows = [dict(r) for r in conn.execute("""
+            SELECT rs.id, rs.topology_id, rs.hypervisor_id, rs.label,
+                   rs.started_at, rs.poll_interval_sec,
+                   h.name AS hypervisor_name, h.ip AS hypervisor_ip
+            FROM recording_sessions rs
+            LEFT JOIN hypervisors h ON rs.hypervisor_id = h.id
+            WHERE rs.status='recording'
+            ORDER BY rs.started_at DESC
+        """).fetchall()]
+    for r in rows:
+        topo = TOPOLOGIES.get(r["topology_id"], {})
+        if r["hypervisor_id"]:
+            r["display_label"] = r["hypervisor_name"] or r["hypervisor_ip"] or str(r["hypervisor_id"])
+        else:
+            r["display_label"] = topo.get("label", r["topology_id"])
+    return jsonify(rows)
+
+
+@app.route("/api/reports/<int:report_id>/live")
+def api_report_live(report_id):
+    """Live data for an active recording — same as /data but works while status='recording'."""
+    data = _build_report_data(report_id)
+    if not data:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(data)
+
+
+# ── Reports API ───────────────────────────────────────────────────────────────
+
+@app.route("/api/reports")
+def api_reports():
+    tid = request.args.get("topology", "")
+    with get_db() as conn:
+        base = """
+            SELECT rs.*, h.name AS hypervisor_name, h.ip AS hypervisor_ip
+            FROM recording_sessions rs
+            LEFT JOIN hypervisors h ON rs.hypervisor_id = h.id
+            WHERE rs.status != 'recording'
+        """
+        if tid:
+            rows = [dict(r) for r in conn.execute(
+                base + " AND rs.topology_id=? ORDER BY rs.started_at DESC", (tid,)
+            ).fetchall()]
+        else:
+            rows = [dict(r) for r in conn.execute(
+                base + " ORDER BY rs.started_at DESC"
+            ).fetchall()]
+    for r in rows:
+        if r.get("started_at") and r.get("stopped_at"):
+            try:
+                t0 = datetime.strptime(r["started_at"][:19], "%Y-%m-%dT%H:%M:%S")
+                t1 = datetime.strptime(r["stopped_at"][:19], "%Y-%m-%dT%H:%M:%S")
+                r["duration_sec"] = int((t1 - t0).total_seconds())
+            except ValueError:
+                r["duration_sec"] = 0
+        else:
+            r["duration_sec"] = 0
+        if r.get("hypervisor_id"):
+            r["topology_label"] = r.get("hypervisor_name") or r.get("hypervisor_ip") or "Bastion"
+        else:
+            r["topology_label"] = TOPOLOGIES.get(r["topology_id"], {}).get("label", r["topology_id"])
+    return jsonify(rows)
+
+
+@app.route("/api/reports/<int:report_id>/data")
+def api_report_data(report_id):
+    data = _build_report_data(report_id)
+    if not data:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(data)
+
+
+@app.route("/api/reports/<int:report_id>/download")
+def api_report_download(report_id):
+    data = _build_report_data(report_id)
+    if not data:
+        return "Report not found", 404
+    html = render_template(
+        "report.html",
+        report_data=data,
+        warn_free_pct=WARN_FREE_PCT,
+        crit_free_pct=CRIT_FREE_PCT,
+    )
+    s   = data["session"]
+    tid = s["topology_id"]
+    fname = f"report_{report_id}_{tid}_{s['started_at'][:10]}.html"
+    return Response(
+        html,
+        mimetype="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -998,5 +1457,6 @@ if __name__ == "__main__":
     init_db()
     log.info("Starting background collector...")
     threading.Thread(target=background_loop, daemon=True).start()
+    threading.Thread(target=recording_poll_manager, daemon=True).start()
     log.info("Starting web server on http://0.0.0.0:5001")
     app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)

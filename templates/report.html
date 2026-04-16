@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Report — {{ report_data.topology_label }}{% if report_data.session.label %} — {{ report_data.session.label }}{% endif %} — {{ report_data.session.started_at[:10] }}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <style>
+    body { background:#0d1117; color:#c9d1d9; font-size:.85rem; font-family:system-ui,sans-serif; }
+
+    /* Header */
+    .report-header { background:#161b22; border-bottom:1px solid #30363d;
+                     padding:1.1rem 1.5rem; margin-bottom:1.5rem; }
+    .report-header h4 { margin:0; font-size:1.05rem; }
+
+    /* Section cards */
+    .section-card { background:#161b22; border:1px solid #30363d; border-radius:10px;
+                    margin-bottom:1.5rem; overflow:hidden; }
+    .section-header { background:#1c2128; border-bottom:1px solid #30363d;
+                      padding:.7rem 1rem; }
+
+    /* Stat cards */
+    .stat-card { background:#0d1117; border:1px solid #21262d; border-radius:8px;
+                 padding:.65rem .9rem; }
+    .stat-card .label { color:#8b949e; font-size:.7rem; text-transform:uppercase; letter-spacing:.5px; }
+    .stat-card .value { font-size:1.05rem; font-weight:700; margin-top:1px; }
+
+    /* Chart */
+    .chart-wrap { position:relative; height:240px; }
+
+    /* Status badges */
+    .badge-ok       { background:#1a4731; color:#3fb950; }
+    .badge-warning  { background:#4a3600; color:#d29922; }
+    .badge-critical { background:#5c1a1a; color:#f85149; }
+    .badge-no_data  { background:#21262d; color:#8b949e; }
+
+    /* Table */
+    .table { font-size:.78rem; }
+    .table thead th { background:#1c2128; border-color:#30363d; color:#8b949e;
+                      font-size:.7rem; text-transform:uppercase; letter-spacing:.4px; }
+    .table tbody td { border-color:#21262d; vertical-align:middle; }
+
+    footer { color:#6e7681; font-size:.72rem; text-align:center;
+             padding:1.5rem; border-top:1px solid #21262d; margin-top:1rem; }
+  </style>
+</head>
+<body>
+
+<!-- ── Report Header ────────────────────────────────────────────────────────── -->
+<div class="report-header">
+  <div class="d-flex align-items-start justify-content-between flex-wrap gap-2">
+    <div>
+      <h4>
+        <i class="bi bi-file-earmark-bar-graph text-info me-2"></i>
+        Memory Report
+        {% if report_data.session.label %}
+          — <strong>{{ report_data.session.label }}</strong>
+        {% endif %}
+      </h4>
+      <div class="mt-1 d-flex align-items-center gap-2 flex-wrap">
+        <span class="badge bg-secondary">{{ report_data.topology_label }}</span>
+        <span class="text-muted" style="font-size:.78rem">
+          <i class="bi bi-calendar3 me-1"></i>
+          {{ report_data.session.started_at[:19]|replace("T"," ") }} UTC
+          <span class="mx-1">→</span>
+          {{ report_data.session.stopped_at[:19]|replace("T"," ") }} UTC
+        </span>
+      </div>
+    </div>
+    <div class="d-flex gap-3">
+      <div class="text-center">
+        <div style="font-size:1.4rem;font-weight:700;color:#58a6ff">{{ report_data.session.device_count }}</div>
+        <div style="font-size:.68rem;color:#8b949e">devices</div>
+      </div>
+      <div class="text-center">
+        <div style="font-size:1.4rem;font-weight:700;color:#3fb950">{{ report_data.session.sample_count }}</div>
+        <div style="font-size:.68rem;color:#8b949e">samples</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="container-fluid px-4">
+
+<!-- ── Summary Table ────────────────────────────────────────────────────────── -->
+<div class="section-card">
+  <div class="section-header">
+    <strong><i class="bi bi-table me-2"></i>Device Summary</strong>
+  </div>
+  <div class="p-2">
+    <div class="table-responsive">
+      <table class="table table-hover mb-0" style="background:transparent">
+        <thead>
+          <tr>
+            <th>Type</th><th>VM Name</th><th>IP</th><th>Hypervisor</th>
+            <th>Total RAM</th><th>Free min</th><th>Free avg</th>
+            <th>CPU avg</th><th>CPU peak</th><th>HA%</th><th>Cores</th><th>Samples</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for dev in report_data.devices %}
+          {% set sm = dev.summary %}
+          {% set total = sm.mem_total_kb or 1 %}
+          {% set free_min_pct = (sm.mem_free_min_kb / total * 100) if sm.mem_free_min_kb is not none else 0 %}
+          <tr>
+            <td>
+              {% if dev.device_type == 'edge' %}
+                <i class="bi bi-cpu text-primary me-1"></i>Edge
+              {% else %}
+                <i class="bi bi-diagram-3 text-success me-1"></i>GW
+              {% endif %}
+            </td>
+            <td><strong>{{ dev.vm_name or dev.ip }}</strong></td>
+            <td><code style="font-size:.72rem">{{ dev.ip }}</code></td>
+            <td>{{ dev.hypervisor_name }}</td>
+            <td>{{ "%.0f"|format((sm.mem_total_kb or 0) / 1024) }} MB</td>
+            <td style="color:
+              {%- if free_min_pct < crit_free_pct -%}#f85149
+              {%- elif free_min_pct < warn_free_pct -%}#d29922
+              {%- else -%}#3fb950{%- endif -%};font-weight:600">
+              {{ "%.0f"|format((sm.mem_free_min_kb or 0) / 1024) }} MB
+              <span style="font-size:.68rem;opacity:.7">({{ "%.0f"|format(free_min_pct) }}%)</span>
+            </td>
+            <td>{{ "%.0f"|format((sm.mem_free_avg_kb or 0) / 1024) }} MB</td>
+            <td>{{ "%.1f"|format(sm.cpu_pct_avg or 0) }}%</td>
+            <td>{{ "%.1f"|format(sm.cpu_pct_max or 0) }}%</td>
+            <td style="color:{% if (sm.ha_reachable_pct or 0) > 90 %}#3fb950{% else %}#d29922{% endif %}">
+              {{ "%.0f"|format(sm.ha_reachable_pct or 0) }}%
+            </td>
+            <td {% if sm.core_count_max > 0 %}style="color:#f85149;font-weight:700"{% endif %}>
+              {{ sm.core_count_max or 0 }}
+            </td>
+            <td>{{ sm.sample_count }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ── Per-device Charts ─────────────────────────────────────────────────────── -->
+{% for dev in report_data.devices %}
+{% set sm = dev.summary %}
+{% set total = sm.mem_total_kb or 1 %}
+{% set free_min_pct = (sm.mem_free_min_kb / total * 100) if sm.mem_free_min_kb is not none else 0 %}
+<div class="section-card">
+  <div class="section-header d-flex align-items-center gap-2 flex-wrap">
+    {% if dev.device_type == 'edge' %}
+      <i class="bi bi-cpu text-primary"></i>
+    {% else %}
+      <i class="bi bi-diagram-3 text-success"></i>
+    {% endif %}
+    <strong>{{ dev.vm_name or dev.ip }}</strong>
+    <code class="text-muted" style="font-size:.72rem">{{ dev.ip }}</code>
+    <span class="text-muted" style="font-size:.72rem">{{ dev.hypervisor_name }}</span>
+    {% if sm.core_count_max > 0 %}
+      <span class="badge badge-critical ms-1" style="font-size:.65rem">
+        <i class="bi bi-bug-fill me-1"></i>{{ sm.core_count_max }} cores
+      </span>
+    {% endif %}
+    <span class="badge bg-secondary ms-auto" style="font-size:.65rem">{{ sm.sample_count }} samples</span>
+  </div>
+  <div class="p-3">
+    <!-- Stat cards row -->
+    <div class="row g-2 mb-3">
+      <div class="col-6 col-md-4 col-lg-2">
+        <div class="stat-card">
+          <div class="label">Total RAM</div>
+          <div class="value">{{ "%.0f"|format(total / 1024) }} MB</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-4 col-lg-2">
+        <div class="stat-card">
+          <div class="label">Free (min)</div>
+          <div class="value" style="color:
+            {%- if free_min_pct < crit_free_pct -%}#f85149
+            {%- elif free_min_pct < warn_free_pct -%}#d29922
+            {%- else -%}#3fb950{%- endif -%}">
+            {{ "%.0f"|format((sm.mem_free_min_kb or 0) / 1024) }} MB
+            <span style="font-size:.7rem;opacity:.8">({{ "%.0f"|format(free_min_pct) }}%)</span>
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-4 col-lg-2">
+        <div class="stat-card">
+          <div class="label">Free (avg)</div>
+          <div class="value">{{ "%.0f"|format((sm.mem_free_avg_kb or 0) / 1024) }} MB</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-4 col-lg-2">
+        <div class="stat-card">
+          <div class="label">CPU avg / peak</div>
+          <div class="value">{{ "%.1f"|format(sm.cpu_pct_avg or 0) }}% / {{ "%.1f"|format(sm.cpu_pct_max or 0) }}%</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-4 col-lg-2">
+        <div class="stat-card">
+          <div class="label">HA Reachable</div>
+          <div class="value" style="color:{% if (sm.ha_reachable_pct or 0) > 90 %}#3fb950{% elif (sm.ha_reachable_pct or 0) > 50 %}#d29922{% else %}#f85149{% endif %}">
+            {{ "%.0f"|format(sm.ha_reachable_pct or 0) }}%
+          </div>
+        </div>
+      </div>
+      <div class="col-6 col-md-4 col-lg-2">
+        <div class="stat-card">
+          <div class="label">Core dumps</div>
+          <div class="value" {% if sm.core_count_max > 0 %}style="color:#f85149"{% endif %}>
+            {{ sm.core_count_max or 0 }}
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Chart -->
+    <div class="chart-wrap">
+      <canvas id="chart_{{ dev.id }}"></canvas>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+{% if not report_data.devices %}
+<div class="text-muted text-center py-5">No device data was captured in this recording window.</div>
+{% endif %}
+
+</div><!-- /container -->
+
+<footer>
+  Generated by Solution Topology Watcher &nbsp;·&nbsp;
+  {{ report_data.session.stopped_at[:10] if report_data.session.stopped_at else "" }}
+  &nbsp;·&nbsp; WARN threshold: {{ warn_free_pct }}% free &nbsp;·&nbsp; CRIT threshold: {{ crit_free_pct }}% free
+</footer>
+
+<!-- ── Embedded chart data and rendering ────────────────────────────────────── -->
+<script>
+const WARN_FREE_PCT = {{ warn_free_pct }};
+const CRIT_FREE_PCT = {{ crit_free_pct }};
+
+const REPORT_DEVICES = {{ report_data.devices | tojson }};
+
+function buildChart(dev) {
+  const ctx = document.getElementById("chart_" + dev.id)?.getContext("2d");
+  if (!ctx) return;
+
+  const samples  = dev.samples;
+  const labels   = samples.map(s => new Date(s.ts.endsWith("Z") ? s.ts : s.ts + "Z"));
+  const freeMB   = samples.map(s => s.mem_free_kb      != null ? s.mem_free_kb / 1024      : null);
+  const availMB  = samples.map(s => s.mem_available_kb != null ? s.mem_available_kb / 1024 : null);
+  const haFreeMB = samples.map(s =>
+    s.ha_reachable && s.ha_mem_free_kb != null ? s.ha_mem_free_kb / 1024 : null);
+  const hasHA    = haFreeMB.some(v => v != null);
+  const maxTotal = Math.max(...samples.filter(s => s.mem_total_kb).map(s => s.mem_total_kb / 1024), 1);
+  const warnMB   = maxTotal * (WARN_FREE_PCT / 100);
+  const critMB   = maxTotal * (CRIT_FREE_PCT / 100);
+  const ptRadius = samples.length > 60 ? 0 : 2;
+
+  const datasets = [
+    { label: "Free",      data: freeMB,  borderColor: "#1f6feb",
+      backgroundColor: "rgba(31,111,235,.09)", fill: true,
+      tension: .3, pointRadius: ptRadius, borderWidth: 2 },
+    { label: "Available", data: availMB, borderColor: "#3fb950",
+      backgroundColor: "transparent", borderDash: [5, 3],
+      tension: .3, pointRadius: 0, borderWidth: 1.5 },
+  ];
+  if (hasHA) datasets.push({
+    label: "HA Free", data: haFreeMB, borderColor: "#58a6ff",
+    backgroundColor: "transparent", borderDash: [8, 4],
+    tension: .3, pointRadius: 0, borderWidth: 1.5,
+  });
+
+  new Chart(ctx, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { labels: { color: "#8b949e", font: { size: 10 }, boxWidth: 12 } },
+        tooltip: {
+          backgroundColor: "#1c2128", borderColor: "#30363d", borderWidth: 1,
+          titleColor: "#c9d1d9", bodyColor: "#8b949e",
+          callbacks: {
+            label: c => ` ${c.dataset.label}: ${c.parsed.y != null ? c.parsed.y.toFixed(0) + " MB" : "—"}`,
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: "time", grid: { color: "#21262d" },
+          ticks: { color: "#8b949e", maxTicksLimit: 8, font: { size: 9 } },
+          time: { displayFormats: { minute: "HH:mm", hour: "MMM d HH:mm", day: "MMM d" } },
+        },
+        y: {
+          title: { display: true, text: "Memory (MB)", color: "#8b949e", font: { size: 10 } },
+          grid: { color: "#21262d" },
+          ticks: { color: "#8b949e", font: { size: 10 } },
+          min: 0,
+        },
+      },
+    },
+    plugins: [{
+      id: "thresholds",
+      afterDraw(chart) {
+        const { ctx: c, chartArea: { left, right }, scales: { y } } = chart;
+        [[warnMB, "#d29922", "WARN"], [critMB, "#f85149", "CRIT"]].forEach(([yv, col, lbl]) => {
+          const yp = y.getPixelForValue(yv);
+          c.save(); c.beginPath(); c.setLineDash([6, 4]);
+          c.strokeStyle = col; c.lineWidth = 1;
+          c.moveTo(left, yp); c.lineTo(right, yp); c.stroke();
+          c.fillStyle = col; c.font = "9px monospace";
+          c.fillText(lbl, left + 4, yp - 3); c.restore();
+        });
+      }
+    }]
+  });
+}
+
+REPORT_DEVICES.forEach(buildChart);
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
