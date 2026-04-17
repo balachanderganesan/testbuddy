@@ -1790,8 +1790,15 @@ def api_alerts():
 def api_checks():
     """Return latest check results with non-ok alerts for a topology."""
     tid = request.args.get("topology", "chennai")
+    hv_id = request.args.get("hypervisor_id")
     with get_db() as conn:
-        rows = [dict(r) for r in conn.execute("""
+        if hv_id:
+            where = "d.hypervisor_id = ?"
+            params = (int(hv_id),)
+        else:
+            where = "h.topology_id = ?"
+            params = (tid,)
+        rows = [dict(r) for r in conn.execute(f"""
             SELECT dc.id, dc.device_id, dc.ts, dc.check_type,
                    dc.alert_level, dc.alert_detail,
                    d.device_type, d.ip, d.vm_name,
@@ -1799,7 +1806,7 @@ def api_checks():
             FROM device_checks dc
             JOIN devices d ON dc.device_id = d.id
             JOIN hypervisors h ON d.hypervisor_id = h.id
-            WHERE h.topology_id = ?
+            WHERE {where}
               AND dc.alert_level != 'ok'
               AND COALESCE(dc.dismissed, 0) = 0
               AND dc.ts = (
@@ -1810,7 +1817,7 @@ def api_checks():
             ORDER BY
               CASE dc.alert_level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
               dc.ts DESC
-        """, (tid,)).fetchall()]
+        """, params).fetchall()]
     return jsonify(rows)
 
 
