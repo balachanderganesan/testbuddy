@@ -43,6 +43,13 @@
     .mem-bar { height:4px; border-radius:2px; background:#21262d; margin-top:3px; min-width:50px; }
     .mem-bar-fill { height:100%; border-radius:2px; }
 
+    /* Sortable headers */
+    .sortable { cursor:pointer; user-select:none; }
+    .sortable:hover { color:#c9d1d9; }
+    .sort-arrow { font-size:.6rem; margin-left:2px; color:#6e7681; }
+    .sort-arrow.asc::after  { content:"▲"; color:#58a6ff; }
+    .sort-arrow.desc::after { content:"▼"; color:#58a6ff; }
+
     /* Cores badge */
     .cores-ok   { color:#3fb950; }
     .cores-warn { color:#f85149; font-weight:600; }
@@ -376,21 +383,21 @@
       <table class="table table-hover align-middle">
         <thead>
           <tr>
-            <th>Type</th>
-            <th>VM Name</th>
-            <th>IP</th>
-            <th>HV / Port</th>
-            <th title="edged / gwd process PID">PID</th>
-            <th title="edged / gwd process uptime since last restart">Uptime</th>
-            <th title="% of total RAM that is currently free">Free %</th>
-            <th>Free / Total</th>
-            <th title="CPU% consumed by edged or gwd">CPU %</th>
-            <th title="Memory trend: KB/h = KB freed or consumed per hour. Negative = increasing usage.">Trend KB/h</th>
-            <th title="Core dump files found in /velocloud/core and /velocloud/kcore">Cores</th>
-            <th title="HA standby peer reachable at 169.254.2.2">HA Peer</th>
-            <th title="Memory health: OK = normal, WARNING = free &lt;15% or losing &gt;200 KB/h, CRITICAL = free &lt;8% or losing &gt;800 KB/h">
-              Mem Status</th>
-            <th title="Diagnostic checks: T=Tunnel R=Route P=Path SP=StalePI ST=StaleTD H=Health D=DPDK">Checks</th>
+            <th class="sortable" onclick="toggleSort('type')">Type <span class="sort-arrow" id="sort_type"></span></th>
+            <th class="sortable" onclick="toggleSort('vm_name')">VM Name <span class="sort-arrow" id="sort_vm_name"></span></th>
+            <th class="sortable" onclick="toggleSort('ip')">IP <span class="sort-arrow" id="sort_ip"></span></th>
+            <th class="sortable" onclick="toggleSort('hypervisor')">HV / Port <span class="sort-arrow" id="sort_hypervisor"></span></th>
+            <th class="sortable" onclick="toggleSort('pid')" title="edged / gwd process PID">PID <span class="sort-arrow" id="sort_pid"></span></th>
+            <th class="sortable" onclick="toggleSort('uptime')" title="edged / gwd process uptime since last restart">Uptime <span class="sort-arrow" id="sort_uptime"></span></th>
+            <th class="sortable" onclick="toggleSort('free_pct')" title="% of total RAM that is currently free">Free % <span class="sort-arrow" id="sort_free_pct"></span></th>
+            <th class="sortable" onclick="toggleSort('free_kb')">Free / Total <span class="sort-arrow" id="sort_free_kb"></span></th>
+            <th class="sortable" onclick="toggleSort('cpu')" title="CPU% consumed by edged or gwd">CPU % <span class="sort-arrow" id="sort_cpu"></span></th>
+            <th class="sortable" onclick="toggleSort('slope')" title="Memory trend: KB/h = KB freed or consumed per hour. Negative = increasing usage.">Trend KB/h <span class="sort-arrow" id="sort_slope"></span></th>
+            <th class="sortable" onclick="toggleSort('cores')" title="Core dump files found in /velocloud/core and /velocloud/kcore">Cores <span class="sort-arrow" id="sort_cores"></span></th>
+            <th class="sortable" onclick="toggleSort('ha')" title="HA standby peer reachable at 169.254.2.2">HA Peer <span class="sort-arrow" id="sort_ha"></span></th>
+            <th class="sortable" onclick="toggleSort('status')" title="Memory health: OK = normal, WARNING = free &lt;15% or losing &gt;200 KB/h, CRITICAL = free &lt;8% or losing &gt;800 KB/h">
+              Mem Status <span class="sort-arrow" id="sort_status"></span></th>
+            <th class="sortable" onclick="toggleSort('checks')" title="Diagnostic checks: T=Tunnel R=Route P=Path SP=StalePI ST=StaleTD H=Health D=DPDK">Checks <span class="sort-arrow" id="sort_checks"></span></th>
           </tr>
         </thead>
         <tbody id="deviceTable"></tbody>
@@ -762,11 +769,74 @@ async function loadDevices() {
 
 function applySearch() {
   const q = (document.getElementById("searchBox").value || "").toLowerCase();
-  const rows = allDevices.filter(d =>
+  const filtered = allDevices.filter(d =>
     !q || d.ip.includes(q) || (d.vm_name || "").toLowerCase().includes(q) ||
     d.hypervisor_name.toLowerCase().includes(q) || d.hypervisor_ip.includes(q)
   );
-  renderTable(rows);
+  renderTable(applySorting(filtered));
+}
+
+// ── Column sorting ───────────────────────────────────────────────────────────
+let currentSortCol = null;
+let currentSortDir = null; // 'asc' or 'desc'
+
+function _sortValue(dev, col) {
+  const mem = dev.memory || {};
+  const cur = mem.current;
+  switch (col) {
+    case 'type':       return dev.device_type || '';
+    case 'vm_name':    return (dev.vm_name || dev.ip || '').toLowerCase();
+    case 'ip':         return dev.ip || '';
+    case 'hypervisor': return (dev.hypervisor_name || '').toLowerCase();
+    case 'pid':        return cur?.pid ?? -1;
+    case 'uptime':     return cur?.process_uptime_sec ?? -1;
+    case 'free_pct':   return cur?.free_pct ?? -1;
+    case 'free_kb':    return cur?.mem_free_kb ?? -1;
+    case 'cpu':        return cur?.cpu_pct ?? -1;
+    case 'slope':      return mem.slope_kb_h ?? 0;
+    case 'cores':      return cur?.core_count ?? 0;
+    case 'ha':         return mem.ha ? mem.ha.free_pct : -1;
+    case 'status': {
+      const a = dev.reachable ? (mem.alert || 'no_data') : 'offline';
+      return {critical:0, warning:1, ok:2, no_data:3, offline:4}[a] ?? 5;
+    }
+    case 'checks': {
+      const cs = dev.checks_summary || {};
+      const counts = Object.values(cs);
+      const c = counts.filter(v => v === 'critical').length;
+      const w = counts.filter(v => v === 'warning').length;
+      return c * 1000 + w;
+    }
+    default: return 0;
+  }
+}
+
+function toggleSort(col) {
+  if (currentSortCol === col) {
+    currentSortDir = currentSortDir === 'asc' ? 'desc' : currentSortDir === 'desc' ? null : 'asc';
+    if (!currentSortDir) currentSortCol = null;
+  } else {
+    currentSortCol = col;
+    currentSortDir = 'asc';
+  }
+  // Update arrow indicators
+  document.querySelectorAll('.sort-arrow').forEach(el => el.className = 'sort-arrow');
+  if (currentSortCol && currentSortDir) {
+    const arrow = document.getElementById('sort_' + currentSortCol);
+    if (arrow) arrow.className = 'sort-arrow ' + currentSortDir;
+  }
+  applySearch();
+}
+
+function applySorting(devices) {
+  if (!currentSortCol || !currentSortDir) return devices;
+  const dir = currentSortDir === 'asc' ? 1 : -1;
+  return [...devices].sort((a, b) => {
+    const va = _sortValue(a, currentSortCol);
+    const vb = _sortValue(b, currentSortCol);
+    if (typeof va === 'string') return dir * va.localeCompare(vb);
+    return dir * ((va > vb ? 1 : va < vb ? -1 : 0));
+  });
 }
 
 function renderTable(devices) {
