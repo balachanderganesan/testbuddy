@@ -309,13 +309,6 @@
     </div>
     <div class="col-6 col-md-3 col-lg-2">
       <div class="stat-card">
-        <div class="label"><i class="bi bi-exclamation-triangle me-1"></i>Alerts</div>
-        <div class="value" id="sumAlerts" style="color:#d29922">—</div>
-        <div class="sub" id="sumAlertsSub">—</div>
-      </div>
-    </div>
-    <div class="col-6 col-md-3 col-lg-2">
-      <div class="stat-card">
         <div class="label"><i class="bi bi-bug me-1"></i>Cores</div>
         <div class="value text-danger" id="sumCores">—</div>
         <div class="sub">across all devices</div>
@@ -323,14 +316,7 @@
     </div>
     <div class="col-6 col-md-3 col-lg-2">
       <div class="stat-card">
-        <div class="label"><i class="bi bi-database me-1"></i>Samples</div>
-        <div class="value text-secondary" id="sumSamples">—</div>
-        <div class="sub">collected</div>
-      </div>
-    </div>
-    <div class="col-6 col-md-3 col-lg-2">
-      <div class="stat-card">
-        <div class="label"><i class="bi bi-shield-check me-1"></i>Check Alerts</div>
+        <div class="label"><i class="bi bi-shield-check me-1"></i>Steady-state Alerts</div>
         <div class="value" id="sumCheckAlerts" style="color:#3fb950">—</div>
         <div class="sub" id="sumCheckAlertsSub">—</div>
       </div>
@@ -677,20 +663,7 @@ async function loadSummary() {
   document.getElementById("sumEdgeSub").textContent = d.edges.reachable+" reachable";
   document.getElementById("sumGW").textContent      = d.gateways.total;
   document.getElementById("sumGWSub").textContent   = d.gateways.reachable+" reachable";
-  document.getElementById("sumSamples").textContent = d.total_samples.toLocaleString();
   document.getElementById("lastUpdated").textContent = "Updated "+fmtTime(d.server_time);
-}
-
-// ── Alerts (summary card only) ────────────────────────────────────────────────
-async function loadAlerts() {
-  const alerts = await fetch(`/api/alerts?topology=${currentTopology}${_bastionParam()}`).then(r => r.json());
-  const crits = alerts.filter(a => a.alert === "critical").length;
-  const warns = alerts.filter(a => a.alert === "warning").length;
-  const sumA  = document.getElementById("sumAlerts");
-  sumA.textContent  = alerts.length;
-  sumA.style.color  = alerts.length > 0 ? "#f85149" : "#3fb950";
-  document.getElementById("sumAlertsSub").textContent = alerts.length
-    ? `${crits} crit · ${warns} warn` : "All healthy";
 }
 
 // ── Core dumps banner ─────────────────────────────────────────────────────────
@@ -1019,7 +992,7 @@ async function loadCheckAlerts() {
       (groups[c.check_type] = groups[c.check_type] || []).push(c);
     }
 
-    const VISIBLE_LIMIT = 10;
+    const VISIBLE_LIMIT = 5;
     let html = `<div class="d-flex gap-2 mb-2">
       <button class="btn btn-sm btn-outline-warning py-0 px-2" id="btnDismissSelected"
               onclick="dismissSelectedCheckAlerts()" disabled style="font-size:.72rem">
@@ -1035,14 +1008,17 @@ async function loadCheckAlerts() {
       const visible = items.slice(0, VISIBLE_LIMIT);
       const overflow = items.slice(VISIBLE_LIMIT);
 
-      html += `<div class="mb-2">
-        <div class="d-flex align-items-center gap-2 mb-1">
+      html += `<div class="mb-2" style="border:1px solid #30363d;border-radius:8px;overflow:hidden">
+        <div class="d-flex align-items-center gap-2 px-2 py-1" style="background:#1c2128;cursor:pointer"
+             onclick="collapseCheckSection('${catId}')">
+          <i class="bi bi-chevron-down" id="${catId}_chevron" style="font-size:.7rem;color:#8b949e;transition:transform .2s"></i>
           <strong style="font-size:.78rem;color:#8b949e">${label}</strong>
           <span class="badge bg-secondary" style="font-size:.6rem">${items.length}</span>
           ${catCrits ? `<span class="badge badge-critical" style="font-size:.6rem">${catCrits} crit</span>` : ''}
           ${catWarns ? `<span class="badge badge-warning" style="font-size:.6rem">${catWarns} warn</span>` : ''}
         </div>
-        ${visible.map(c => _renderCheckAlertItem(c)).join('')}`;
+        <div id="${catId}_body" class="px-1 py-1">
+          ${visible.map(c => _renderCheckAlertItem(c)).join('')}`;
 
       if (overflow.length) {
         html += `<div id="${catId}_overflow" style="display:none">
@@ -1050,14 +1026,27 @@ async function loadCheckAlerts() {
         </div>
         <button class="btn btn-sm btn-link py-0 px-1" style="font-size:.72rem"
                 id="${catId}_toggle"
-                onclick="toggleCheckCategory('${catId}')">
+                onclick="event.stopPropagation(); toggleCheckCategory('${catId}')">
           Show ${overflow.length} more...
         </button>`;
       }
-      html += `</div>`;
+      html += `</div></div>`;
     }
     list.innerHTML = html;
   } catch(e) { console.error("loadCheckAlerts:", e); }
+}
+
+function collapseCheckSection(catId) {
+  const body = document.getElementById(catId + '_body');
+  const chevron = document.getElementById(catId + '_chevron');
+  if (!body) return;
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    if (chevron) chevron.style.transform = 'rotate(0deg)';
+  } else {
+    body.style.display = 'none';
+    if (chevron) chevron.style.transform = 'rotate(-90deg)';
+  }
 }
 
 function toggleCheckCategory(catId) {
@@ -2398,7 +2387,7 @@ function closeReportDetail() {
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadAlerts(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis()]);
+  await Promise.all([loadSummary(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis()]);
   checkRecordingStatus();
   // Refresh active-recordings section if Reports tab is visible
   if (document.getElementById("reportsPanel").style.display !== "none" && activeReportId === null) {
