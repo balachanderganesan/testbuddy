@@ -339,6 +339,15 @@
     <div id="coresList"></div>
   </div>
 
+  <!-- Logs analysis banner -->
+  <div id="logsBanner" style="display:none" class="mb-4">
+    <div class="d-flex align-items-center mb-2">
+      <i class="bi bi-journal-text text-danger me-2"></i>
+      <strong class="text-danger">Logs Analysis</strong>
+    </div>
+    <div id="logsList"></div>
+  </div>
+
   <!-- Diagnostic checks banner -->
   <div id="checksBanner" style="display:none" class="mb-4">
     <div class="d-flex align-items-center mb-2 gap-2">
@@ -826,7 +835,7 @@ function renderTable(devices) {
       : "—";
 
     // Diagnostic checks summary dots
-    const checkLabels = {tunnel:'T', route:'R', path:'P', stale_pi:'SP', stale_td:'ST', health:'H', dpdk_leak:'D', memory_top10:'M'};
+    const checkLabels = {tunnel:'T', route:'R', path:'P', stale_pi:'SP', stale_td:'ST', health:'H', dpdk_leak:'D', memory_top10:'M', ha_panic:'HA'};
     const checksSum = dev.checks_summary || {};
     const checkDots = Object.entries(checkLabels).map(([ct, lbl]) => {
       const lvl = checksSum[ct];
@@ -858,7 +867,8 @@ function renderTable(devices) {
 const CHECK_LABELS = {
   tunnel:'Tunnel Status', route:'Route Summary', path:'Path Summary',
   stale_pi:'Stale PI Flows', stale_td:'Stale TD Flows',
-  health:'Health Report', memory_top10:'Memory Top 10', dpdk_leak:'DPDK Leaks'
+  health:'Health Report', memory_top10:'Memory Top 10', dpdk_leak:'DPDK Leaks',
+  ha_panic:'HA Active/Active Panic'
 };
 
 let _checkAlertsData = [];  // cached for dismiss operations
@@ -887,6 +897,32 @@ function _renderCheckAlertItem(c) {
       <i class="bi bi-x"></i>
     </button>
   </div>`;
+}
+
+async function loadLogsAnalysis() {
+  try {
+    const checks = await fetch(`/api/checks?topology=${currentTopology}`).then(r => r.json());
+    const haPanics = checks.filter(c => c.check_type === 'ha_panic');
+    const banner = document.getElementById("logsBanner");
+    const list = document.getElementById("logsList");
+    if (!haPanics.length) { banner.style.display = "none"; return; }
+    banner.style.display = "block";
+    list.innerHTML = haPanics.map(c => {
+      const name = c.vm_name || c.ip;
+      return `<div class="alert-item d-flex align-items-center gap-2">
+        <span class="badge badge-critical" style="font-size:.65rem">CRITICAL</span>
+        <i class="bi bi-cpu text-primary me-1"></i><strong>${name}</strong>
+        <code class="text-muted" style="font-size:.72rem">${c.ip}</code>
+        <span class="badge bg-danger" style="font-size:.65rem">HA ACTIVE/ACTIVE</span>
+        <span class="text-muted" style="font-size:.72rem">${c.alert_detail || ''}</span>
+        <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto"
+                onclick="event.stopPropagation(); openModal(${c.device_id})"
+                title="View device details">
+          <i class="bi bi-graph-up"></i>
+        </button>
+      </div>`;
+    }).join('');
+  } catch(e) { console.error("loadLogsAnalysis:", e); }
 }
 
 async function loadCheckAlerts() {
@@ -1048,6 +1084,14 @@ function renderCheckResult(type, result) {
     if (type === 'dpdk_leak') {
       return `<div style="font-size:.72rem">Leak count: <strong>${result.leak_count ?? 0}</strong></div>`;
     }
+    if (type === 'ha_panic') {
+      const cnt = result.count ?? 0;
+      if (!cnt) return `<div style="font-size:.72rem;color:#3fb950">No HA Active/Active panic detected</div>`;
+      const lines = (result.lines || []).map(l =>
+        `<div style="font-size:.68rem;color:#f85149;font-family:monospace;white-space:pre-wrap">${l}</div>`
+      ).join('');
+      return `<div style="font-size:.72rem"><strong style="color:#f85149">${cnt} ACTIVE/ACTIVE panic occurrence${cnt>1?'s':''}</strong></div>${lines}`;
+    }
   } catch(e) { console.warn("renderCheckResult error:", type, e); }
   return '';
 }
@@ -1163,14 +1207,45 @@ function buildDpdkTrendChart(canvasId, samples) {
   });
 }
 
+const _MEMTOP_COLORS = ["#1f6feb","#f85149","#3fb950","#d29922","#a371f7","#58a6ff","#f0883e","#8b949e","#da3633","#56d364"];
+
+function buildMemtopTrendChart(canvasId, samples) {
+  const ctx = document.getElementById(canvasId)?.getContext("2d");
+  if (!ctx || !samples.length) return;
+  const allNames = {};
+  for (const s of samples) {
+    for (const [k, v] of Object.entries(s)) {
+      if (k === 'ts' || k === 'alert_level') continue;
+      allNames[k] = Math.max(allNames[k] || 0, v || 0);
+    }
+  }
+  const topNames = Object.entries(allNames).sort((a, b) => b[1] - a[1]).slice(0, 10).map(e => e[0]);
+  if (!topNames.length) return;
+  const labels = _tsLabels(samples);
+  const ptR = samples.length > 60 ? 0 : 2;
+  const datasets = topNames.map((name, i) => ({
+    label: name.replace(/^memb\.mod_/, '').replace(/_t$/, ''),
+    data: samples.map(s => s[name] != null ? s[name] / 1024 / 1024 : null),
+    borderColor: _MEMTOP_COLORS[i % _MEMTOP_COLORS.length],
+    backgroundColor: "transparent",
+    tension: .3, pointRadius: ptR, borderWidth: 1.5,
+  }));
+  checkCharts[canvasId] = new Chart(ctx, {
+    type: "line", data: { labels, datasets },
+    options: _trendChartOpts("MB"),
+  });
+}
+
 const _trendBuilders = {
-  tunnel:   (id, s) => buildTunnelTrendChart(id, s),
-  route:    (id, s) => buildRouteTrendChart(id, s),
-  path:     (id, s) => buildPathTrendChart(id, s),
-  stale_pi: (id, s) => buildStaleTrendChart(id, s, "Stale PI"),
-  stale_td: (id, s) => buildStaleTrendChart(id, s, "Stale TD"),
-  health:   (id, s) => buildHealthTrendChart(id, s),
-  dpdk_leak:(id, s) => buildDpdkTrendChart(id, s),
+  tunnel:      (id, s) => buildTunnelTrendChart(id, s),
+  route:       (id, s) => buildRouteTrendChart(id, s),
+  path:        (id, s) => buildPathTrendChart(id, s),
+  stale_pi:    (id, s) => buildStaleTrendChart(id, s, "Stale PI"),
+  stale_td:    (id, s) => buildStaleTrendChart(id, s, "Stale TD"),
+  health:      (id, s) => buildHealthTrendChart(id, s),
+  dpdk_leak:   (id, s) => buildDpdkTrendChart(id, s),
+  ha_panic:    (id, s) => buildStaleTrendChart(id, s, "HA Panics"),
+  memory_top10:(id, s) => buildMemtopTrendChart(id, s),
 };
 
 async function loadDeviceChecks(deviceId, hours) {
@@ -1193,7 +1268,7 @@ async function loadDeviceChecks(deviceId, hours) {
                        : chk.alert_level === 'warning'  ? 'badge-warning' : 'badge-ok';
       const detail = chk.alert_detail || 'OK';
       const resultHtml = renderCheckResult(chk.check_type, chk.result);
-      const hasTrend = chk.check_type !== 'memory_top10' && (trends[chk.check_type]||[]).length > 1;
+      const hasTrend = (trends[chk.check_type]||[]).length > 1;
       const chartHtml = hasTrend
         ? `<div style="height:150px;margin-top:.4rem"><canvas id="trendChart_${chk.check_type}"></canvas></div>`
         : '';
@@ -2253,7 +2328,7 @@ function closeReportDetail() {
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadAlerts(), loadDevices(), loadCheckAlerts()]);
+  await Promise.all([loadSummary(), loadAlerts(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis()]);
   checkRecordingStatus();
   // Refresh active-recordings section if Reports tab is visible
   if (document.getElementById("reportsPanel").style.display !== "none" && activeReportId === null) {

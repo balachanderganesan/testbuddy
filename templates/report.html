@@ -511,6 +511,19 @@ const trendBuilders = {
     new Chart(ctx,{type:"line",data:{labels:_tl(s),datasets:[
       {label:"Leak Count",data:s.map(x=>x.leak_count),borderColor:"#f85149",backgroundColor:"rgba(248,81,73,.08)",fill:true,tension:.3,pointRadius:p,borderWidth:2},
     ]},options:_trendOpts("Leaks")}); },
+  ha_panic: (id, s) => { const ctx=document.getElementById(id)?.getContext("2d"); if(!ctx||!s.length)return; const p=s.length>60?0:2;
+    new Chart(ctx,{type:"line",data:{labels:_tl(s),datasets:[
+      {label:"HA Panics",data:s.map(x=>x.count),borderColor:"#d29922",backgroundColor:"rgba(210,153,34,.08)",fill:true,tension:.3,pointRadius:p,borderWidth:2},
+    ]},options:_trendOpts("Count")}); },
+  memory_top10: (id, s) => { const ctx=document.getElementById(id)?.getContext("2d"); if(!ctx||!s.length)return;
+    const colors=["#1f6feb","#f85149","#3fb950","#d29922","#a371f7","#58a6ff","#f0883e","#8b949e","#da3633","#56d364"];
+    const allN={}; for(const x of s) for(const[k,v] of Object.entries(x)){if(k==='ts'||k==='alert_level')continue; allN[k]=Math.max(allN[k]||0,v||0);}
+    const topN=Object.entries(allN).sort((a,b)=>b[1]-a[1]).slice(0,10).map(e=>e[0]); if(!topN.length)return;
+    const p=s.length>60?0:2;
+    new Chart(ctx,{type:"line",data:{labels:_tl(s),datasets:topN.map((n,i)=>({
+      label:n.replace(/^memb\.mod_/,'').replace(/_t$/,''),data:s.map(x=>x[n]!=null?x[n]/1024/1024:null),
+      borderColor:colors[i%colors.length],backgroundColor:"transparent",tension:.3,pointRadius:p,borderWidth:1.5,
+    }))},options:_trendOpts("MB")}); },
 };
 
 REPORT_DEVICES.forEach(dev => {
