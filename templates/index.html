@@ -944,7 +944,7 @@ function _renderCheckAlertItem(c) {
 
 async function loadLogsAnalysis() {
   try {
-    const checks = await fetch(`/api/checks?topology=${currentTopology}`).then(r => r.json());
+    const checks = await fetch(`/api/checks?topology=${currentTopology}${_bastionParam()}`).then(r => r.json());
     const haPanics = checks.filter(c => c.check_type === 'ha_panic');
     const banner = document.getElementById("logsBanner");
     const list = document.getElementById("logsList");
@@ -970,7 +970,7 @@ async function loadLogsAnalysis() {
 
 async function loadCheckAlerts() {
   try {
-    const checks = await fetch(`/api/checks?topology=${currentTopology}`).then(r => r.json());
+    const checks = await fetch(`/api/checks?topology=${currentTopology}${_bastionParam()}`).then(r => r.json());
     _checkAlertsData = checks;
     const banner = document.getElementById("checksBanner");
     const list = document.getElementById("checksList");
