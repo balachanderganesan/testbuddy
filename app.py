@@ -1512,28 +1512,33 @@ def recording_poll_manager():
 
 # ── Background scheduler ──────────────────────────────────────────────────────
 
+_polling_paused = False
+
+
 def background_loop():
+    global _polling_paused
     last_discovery = {tid: 0 for tid in TOPOLOGIES}
     last_purge = 0
     while True:
-        now = time.time()
-        for tid in TOPOLOGIES:
-            if now - last_discovery[tid] >= REDISCOVER_INTERVAL:
-                try:
-                    run_discovery(tid)
-                except Exception as exc:
-                    log.error(f"Discovery error [{tid}]: {exc}")
-                last_discovery[tid] = time.time()
-        try:
-            run_poll()
-        except Exception as exc:
-            log.error(f"Poll error: {exc}")
-        if now - last_purge >= 3600:
+        if not _polling_paused:
+            now = time.time()
+            for tid in TOPOLOGIES:
+                if now - last_discovery[tid] >= REDISCOVER_INTERVAL:
+                    try:
+                        run_discovery(tid)
+                    except Exception as exc:
+                        log.error(f"Discovery error [{tid}]: {exc}")
+                    last_discovery[tid] = time.time()
             try:
-                purge_old_samples()
+                run_poll()
             except Exception as exc:
-                log.error(f"Purge error: {exc}")
-            last_purge = time.time()
+                log.error(f"Poll error: {exc}")
+            if now - last_purge >= 3600:
+                try:
+                    purge_old_samples()
+                except Exception as exc:
+                    log.error(f"Purge error: {exc}")
+                last_purge = time.time()
         time.sleep(POLL_INTERVAL)
 
 
@@ -1949,6 +1954,20 @@ def api_poll_now():
         return jsonify({"status": "busy", "reason": _op_name + " already running"}), 409
     threading.Thread(target=run_poll, daemon=True).start()
     return jsonify({"status": "poll started"})
+
+
+@app.route("/api/polling/status")
+def api_polling_status():
+    return jsonify({"paused": _polling_paused})
+
+
+@app.route("/api/polling/toggle", methods=["POST"])
+def api_polling_toggle():
+    global _polling_paused
+    _polling_paused = not _polling_paused
+    state = "paused" if _polling_paused else "resumed"
+    log.info(f"Auto-polling {state}")
+    return jsonify({"paused": _polling_paused, "status": state})
 
 
 @app.route("/api/bastion/list")

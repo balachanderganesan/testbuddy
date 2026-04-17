@@ -129,12 +129,15 @@
     <span class="navbar-brand"><i class="bi bi-activity text-primary me-2"></i>Test Buddy</span>
     <div class="d-flex align-items-center gap-3 flex-wrap">
       <span id="lastUpdated">—</span>
-      <span><span class="live-dot"></span><span class="text-success" style="font-size:.72rem">LIVE</span></span>
+      <span id="pollStatusIndicator"><span class="live-dot"></span><span class="text-success" style="font-size:.72rem">LIVE</span></span>
       <button class="btn btn-sm btn-outline-secondary" onclick="triggerRediscover()">
         <i class="bi bi-arrow-repeat me-1"></i>Rediscover
       </button>
       <button class="btn btn-sm btn-outline-primary" onclick="triggerPollNow()">
         <i class="bi bi-lightning me-1"></i>Poll Now
+      </button>
+      <button class="btn btn-sm btn-outline-warning" id="btnPollToggle" onclick="togglePolling()" title="Pause/Resume auto-polling">
+        <i class="bi bi-pause-fill me-1" id="pollToggleIcon"></i><span id="pollToggleLabel">Pause</span>
       </button>
       <div class="d-flex align-items-center gap-2" style="border-left:1px solid #30363d;padding-left:.75rem">
         <select id="recTopoSelect" class="form-select form-select-sm rec-select"
@@ -1441,6 +1444,39 @@ async function triggerPollNow() {
   setTimeout(refreshAll, 8000);
 }
 
+// ── Polling pause/resume ─────────────────────────────────────────────────────
+async function togglePolling() {
+  const r = await fetch("/api/polling/toggle", {method: "POST"});
+  const d = await r.json();
+  updatePollStatus(d.paused);
+  toast(d.paused ? "Auto-polling paused" : "Auto-polling resumed");
+}
+
+function updatePollStatus(paused) {
+  const icon = document.getElementById("pollToggleIcon");
+  const label = document.getElementById("pollToggleLabel");
+  const btn = document.getElementById("btnPollToggle");
+  const indicator = document.getElementById("pollStatusIndicator");
+  if (paused) {
+    icon.className = "bi bi-play-fill me-1";
+    label.textContent = "Resume";
+    btn.className = "btn btn-sm btn-outline-success";
+    indicator.innerHTML = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#d29922;margin-right:4px"></span><span class="text-warning" style="font-size:.72rem">PAUSED</span>';
+  } else {
+    icon.className = "bi bi-pause-fill me-1";
+    label.textContent = "Pause";
+    btn.className = "btn btn-sm btn-outline-warning";
+    indicator.innerHTML = '<span class="live-dot"></span><span class="text-success" style="font-size:.72rem">LIVE</span>';
+  }
+}
+
+async function checkPollStatus() {
+  try {
+    const d = await fetch("/api/polling/status").then(r => r.json());
+    updatePollStatus(d.paused);
+  } catch(e) {}
+}
+
 // ── Recording ─────────────────────────────────────────────────────────────────
 
 async function loadRecordingOptions() {
@@ -2226,6 +2262,7 @@ async function refreshAll() {
 }
 // Initial load
 loadRecordingOptions();
+checkPollStatus();
 refreshAll();
 setInterval(refreshAll, POLL_INTERVAL);
 </script>
