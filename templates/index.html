@@ -38,6 +38,7 @@
     .badge-critical { background:#5c1a1a; color:#f85149; }
     .badge-no_data  { background:#21262d; color:#8b949e; }
     .badge-offline  { background:#21262d; color:#6e7681; }
+    .badge-discovering { background:#1c2f47; color:#58a6ff; }
 
     /* Memory bar */
     .mem-bar { height:4px; border-radius:2px; background:#21262d; margin-top:3px; min-width:50px; }
@@ -79,6 +80,10 @@
     @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.3} }
     .live-dot { display:inline-block; width:7px; height:7px; border-radius:50%;
                 background:#3fb950; animation:pulse 2s infinite; margin-right:4px; }
+
+    /* Discovering spinner */
+    @keyframes spin { to{transform:rotate(360deg)} }
+    .discovering-icon { display:inline-block; animation:spin 1.5s linear infinite; margin-right:2px; }
 
     /* Scrollable table container */
     .tbl-scroll { overflow-x:auto; }
@@ -630,10 +635,12 @@ function fmtTime(iso) {
 
 function alertBadgeClass(a) {
   return {ok:"badge-ok",warning:"badge-warning",critical:"badge-critical",
-          no_data:"badge-no_data",offline:"badge-offline"}[a] || "badge-no_data";
+          no_data:"badge-no_data",offline:"badge-offline",discovering:"badge-discovering"}[a] || "badge-no_data";
 }
 function alertLabel(a) {
-  return {ok:"OK",warning:"WARN",critical:"CRIT",no_data:"NO DATA",offline:"OFFLINE"}[a] || a;
+  const labels = {ok:"OK",warning:"WARN",critical:"CRIT",no_data:"NO DATA",offline:"OFFLINE"};
+  if (a === "discovering") return '<i class="bi bi-arrow-repeat discovering-icon"></i>DISCOVERING';
+  return labels[a] || a;
 }
 function freeColor(pct) {
   if (pct < CRIT_FREE_PCT) return "#f85149";
@@ -1674,15 +1681,20 @@ async function addBastionHost() {
       status.textContent = "Error: " + d.error;
       status.style.color = "#f85149";
     } else {
-      status.textContent = "Added — discovery in progress";
-      status.style.color = "#3fb950";
+      status.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>Added — discovery in progress (devices will show as DISCOVERING)';
+      status.style.color = "#58a6ff";
       document.getElementById("bastionName").value = "";
       document.getElementById("bastionIp").value   = "";
       document.getElementById("bastionUser").value = "";
       document.getElementById("bastionPass").value = "";
       setTimeout(() => { document.getElementById("bastionAddPanel").style.display = "none"; }, 1500);
       loadBastionHosts();
-      setTimeout(() => { loadRecordingOptions(); refreshAll(); }, 10000);
+      setTimeout(() => {
+        status.textContent = "Discovery complete — refreshing...";
+        status.style.color = "#3fb950";
+        loadRecordingOptions();
+        refreshAll();
+      }, 10000);
     }
   } catch (e) {
     status.textContent = "Request failed";

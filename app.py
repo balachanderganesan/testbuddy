@@ -1114,6 +1114,11 @@ def _slope_kb_per_hour(timestamps, free_values):
 
 def get_device_status(device_id):
     with get_db() as conn:
+        # Check device's last_seen timestamp to determine if it's newly discovered
+        device_row = conn.execute(
+            "SELECT last_seen, reachable FROM devices WHERE id=?", (device_id,)
+        ).fetchone()
+
         latest = conn.execute("""
             SELECT pid, mem_total_kb, mem_free_kb, mem_available_kb,
                    cpu_pct, process_uptime_sec, core_count,
@@ -1123,6 +1128,16 @@ def get_device_status(device_id):
         """, (device_id,)).fetchone()
 
         if not latest:
+            # No samples yet - check if this is a newly discovered device
+            if device_row and device_row["last_seen"]:
+                try:
+                    last_seen = _parse_ts(device_row["last_seen"])
+                    time_since_seen = (datetime.utcnow() - last_seen).total_seconds()
+                    # If discovered within last 2 poll cycles and never polled, it's "discovering"
+                    if time_since_seen < (POLL_INTERVAL * 2):
+                        return {"alert": "discovering", "current": None, "slope_kb_h": 0}
+                except Exception:
+                    pass
             return {"alert": "no_data", "current": None, "slope_kb_h": 0}
 
         pid       = latest["pid"]
