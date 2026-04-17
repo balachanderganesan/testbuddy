@@ -675,7 +675,11 @@ def _checks_cmd():
 
         "printf 'VCCHECK_DPDK_BEGIN\\n'; "
         "/opt/vc/bin/vcdbgdump -r dpdk-leak-dump 2>/dev/null || echo ''; "
-        "printf '\\nVCCHECK_DPDK_END\\n'"
+        "printf '\\nVCCHECK_DPDK_END\\n'; "
+
+        "printf 'VCCHECK_HA_PANIC_BEGIN\\n'; "
+        "grep 'PANIC.*ACTIVE/ACTIVE' /var/log/edged.log 2>/dev/null | tail -20 || echo ''; "
+        "printf '\\nVCCHECK_HA_PANIC_END\\n'"
     )
 
 
@@ -914,6 +918,24 @@ def _parse_dpdk_check(block, device):
     }
 
 
+def _parse_ha_panic_check(block, device):
+    """Detect HA ACTIVE/ACTIVE panic lines in /var/log/edged.log."""
+    if not block or not block.strip():
+        return {
+            "check_type": "ha_panic",
+            "result": {"count": 0, "lines": []},
+            "alert_level": "ok",
+            "alert_detail": None,
+        }
+    lines = [l.strip() for l in block.strip().splitlines() if l.strip()]
+    return {
+        "check_type": "ha_panic",
+        "result": {"count": len(lines), "lines": lines[-10:]},
+        "alert_level": "critical",
+        "alert_detail": f"HA ACTIVE/ACTIVE panic detected ({len(lines)} occurrence{'s' if len(lines) != 1 else ''})",
+    }
+
+
 def _parse_checks(raw, device):
     """
     Parse all diagnostic check blocks from the combined SSH output.
@@ -934,6 +956,7 @@ def _parse_checks(raw, device):
         ("health",      lambda: _parse_health_check(_extract_check_block(raw, "HEALTH"), device)),
         ("memory_top10", lambda: _parse_memtop_check(_extract_check_block(raw, "MEMTOP"), device)),
         ("dpdk_leak",   lambda: _parse_dpdk_check(_extract_check_block(raw, "DPDK"), device)),
+        ("ha_panic",    lambda: _parse_ha_panic_check(_extract_check_block(raw, "HA_PANIC"), device)),
     ]
     for name, parse_fn in checks:
         try:
@@ -1374,8 +1397,7 @@ def _build_report_data(session_id):
                 FROM device_checks
                 WHERE device_id IN ({ph})
                   AND ts >= ? AND ts <= ?
-                  AND check_type != 'memory_top10'
-                ORDER BY ts ASC
+                                 ORDER BY ts ASC
             """, (*device_ids, start, stop)).fetchall():
                 check_trend_rows.setdefault(row["device_id"], []).append(row)
 
@@ -1895,6 +1917,13 @@ _TREND_EXTRACTORS = {
     "dpdk_leak": lambda r: {
         "leak_count": r.get("leak_count", 0) if isinstance(r, dict) else 0,
     },
+    "ha_panic": lambda r: {
+        "count": r.get("count", 0) if isinstance(r, dict) else 0,
+    },
+    "memory_top10": lambda r: {
+        e["name"]: e.get("bytes", 0)
+        for e in (r if isinstance(r, list) else [])
+    } if isinstance(r, list) else {},
 }
 
 
@@ -1907,8 +1936,7 @@ def api_device_checks_trends(device_id):
         rows = conn.execute("""
             SELECT ts, check_type, result_json, alert_level
             FROM device_checks
-            WHERE device_id = ? AND ts >= ? AND check_type != 'memory_top10'
-            ORDER BY ts ASC
+            WHERE device_id = ? AND ts >= ?            ORDER BY ts ASC
         """, (device_id, since)).fetchall()
 
     trends = {}
