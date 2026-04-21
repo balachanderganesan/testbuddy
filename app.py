@@ -33,8 +33,7 @@ BASE_DIR     = Path(__file__).parent
 SERVERS_JSON = BASE_DIR / "servers.json"
 DB_PATH      = str(BASE_DIR / "vcmem.db")
 
-POLL_INTERVAL        = 300    # seconds between polls (5 min)
-REDISCOVER_INTERVAL  = 600    # seconds between iptables re-scans
+POLL_INTERVAL        = 900    # seconds between polls (15 min)
 SSH_TIMEOUT          = 15     # SSH connect + exec timeout (seconds)
 HA_SSH_TIMEOUT       = 8      # timeout for each SSH hop to 169.254.2.2
 DB_RETENTION_HOURS   = 168    # keep 7 days of samples
@@ -102,6 +101,14 @@ logging.getLogger("paramiko.transport").setLevel(logging.WARNING)  # suppress no
 # Prevents poll and rediscover from running concurrently (they write the same rows).
 _op_lock = threading.Lock()
 _op_name = ""   # human-readable name of whoever holds the lock
+
+# Poll status tracking
+_poll_status = {
+    "state": "idle",           # idle, polling, discovering
+    "total_devices": 0,
+    "completed": 0,
+    "started_at": None,
+}
 
 app = Flask(__name__)
 
@@ -387,6 +394,7 @@ def run_discovery(topology_id="chennai"):
         log.info(f"Discovery [{topology_id}] skipped — {_op_name} already running")
         return
     _op_name = f"discovery[{topology_id}]"
+    _poll_status["state"] = f"discovering [{topology_id}]"
     try:
         _run_discovery(topology_id)
     finally:
@@ -1079,38 +1087,53 @@ def poll_device(device):
             conn.execute("UPDATE devices SET reachable=0 WHERE id=?", (device["id"],))
 
 
-def run_poll():
+def run_poll(topo_ids=None):
     global _op_name
     if not _op_lock.acquire(blocking=False):
         log.info(f"Poll skipped — {_op_name} already running")
         return
     _op_name = "poll"
     try:
-        _run_poll()
+        _run_poll(topo_ids)
     finally:
         _op_lock.release()
         _op_name = ""
 
 
-def _run_poll():
+def _run_poll(topo_ids=None):
     with get_db() as conn:
-        # Join hypervisors so poll_device gets hypervisor_ip
-        devices = [dict(r) for r in conn.execute("""
-            SELECT d.*, h.ip AS hypervisor_ip
+        q = """
+            SELECT d.*, h.ip AS hypervisor_ip, h.topology_id
             FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
             WHERE NOT (d.console_port >= 2200 AND d.console_port <= 2299)
-        """).fetchall()]
+        """
+        if topo_ids:
+            ph = ",".join("?" * len(topo_ids))
+            q += f" AND h.topology_id IN ({ph})"
+            devices = [dict(r) for r in conn.execute(q, topo_ids).fetchall()]
+        else:
+            devices = [dict(r) for r in conn.execute(q).fetchall()]
 
     if not devices:
         log.info("No devices in DB yet — waiting for discovery")
         return
 
+    _poll_status["state"] = "polling"
+    _poll_status["total_devices"] = len(devices)
+    _poll_status["completed"] = 0
+    _poll_status["started_at"] = datetime.utcnow().isoformat()
+
+    def _tracked_poll(dev):
+        poll_device(dev)
+        _poll_status["completed"] += 1
+
     log.info(f"Polling {len(devices)} devices (max {POLL_WORKERS} concurrent)...")
     with ThreadPoolExecutor(max_workers=POLL_WORKERS) as pool:
         for d in devices:
-            pool.submit(poll_device, d)
+            pool.submit(_tracked_poll, d)
     # pool.__exit__ calls shutdown(wait=True) — blocks until all tasks finish.
     # poll_device handles its own DB writes, SSH timeouts, and errors.
+    _poll_status["state"] = "idle"
     log.info("Poll complete")
 
 
@@ -1536,32 +1559,40 @@ def recording_poll_manager():
 
 _polling_paused = False
 
+# Per-topology polling configuration (runtime-mutable, disabled by default)
+_topo_config = {
+    tid: {"enabled": False, "poll_interval": POLL_INTERVAL}
+    for tid in TOPOLOGIES
+}
+
 
 def background_loop():
     global _polling_paused
-    last_discovery = {tid: 0 for tid in TOPOLOGIES}
+    last_poll = {tid: 0 for tid in TOPOLOGIES}
     last_purge = 0
     while True:
         if not _polling_paused:
             now = time.time()
-            for tid in TOPOLOGIES:
-                if now - last_discovery[tid] >= REDISCOVER_INTERVAL:
-                    try:
-                        run_discovery(tid)
-                    except Exception as exc:
-                        log.error(f"Discovery error [{tid}]: {exc}")
-                    last_discovery[tid] = time.time()
-            try:
-                run_poll()
-            except Exception as exc:
-                log.error(f"Poll error: {exc}")
+            # Poll devices only for enabled topologies at their own interval
+            topo_due = [
+                tid for tid in TOPOLOGIES
+                if _topo_config.get(tid, {}).get("enabled", True)
+                and time.time() - last_poll[tid] >= _topo_config.get(tid, {}).get("poll_interval", POLL_INTERVAL)
+            ]
+            if topo_due:
+                try:
+                    run_poll(topo_due)
+                except Exception as exc:
+                    log.error(f"Poll error: {exc}")
+                for tid in topo_due:
+                    last_poll[tid] = time.time()
             if now - last_purge >= 3600:
                 try:
                     purge_old_samples()
                 except Exception as exc:
                     log.error(f"Purge error: {exc}")
                 last_purge = time.time()
-        time.sleep(POLL_INTERVAL)
+        time.sleep(30)  # wake up every 30s to check which topologies are due
 
 
 # ── REST API ──────────────────────────────────────────────────────────────────
@@ -1983,6 +2014,48 @@ def api_topologies():
     })
 
 
+@app.route("/api/status")
+def api_status():
+    """Return current system status: threads, polling state, DB stats."""
+    active_threads = threading.active_count()
+    total = _poll_status["total_devices"]
+    completed = _poll_status["completed"]
+    waiting = max(0, total - completed) if _poll_status["state"] == "polling" else 0
+    with get_db() as conn:
+        db_devices = conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
+        db_samples = conn.execute("SELECT COUNT(*) FROM memory_samples").fetchone()[0]
+        db_checks = conn.execute("SELECT COUNT(*) FROM device_checks").fetchone()[0]
+        active_recordings = conn.execute(
+            "SELECT COUNT(*) FROM recording_sessions WHERE status='recording'"
+        ).fetchone()[0]
+    return jsonify({
+        "poll": {
+            "state":          _poll_status["state"],
+            "paused":         _polling_paused,
+            "total_devices":  total,
+            "completed":      completed,
+            "waiting":        waiting,
+            "started_at":     _poll_status["started_at"],
+            "poll_interval":  POLL_INTERVAL,
+            "poll_workers":   POLL_WORKERS,
+        },
+        "threads": {
+            "active": active_threads,
+        },
+        "db": {
+            "devices":           db_devices,
+            "memory_samples":    db_samples,
+            "device_checks":     db_checks,
+            "active_recordings": active_recordings,
+        },
+        "server_time": datetime.utcnow().isoformat() + "Z",
+        "topologies": {
+            tid: {"enabled": cfg["enabled"], "poll_interval": cfg["poll_interval"]}
+            for tid, cfg in _topo_config.items()
+        },
+    })
+
+
 @app.route("/api/poll_now", methods=["POST"])
 def api_poll_now():
     if _op_lock.locked():
@@ -1993,7 +2066,13 @@ def api_poll_now():
 
 @app.route("/api/polling/status")
 def api_polling_status():
-    return jsonify({"paused": _polling_paused})
+    return jsonify({
+        "paused": _polling_paused,
+        "topologies": {
+            tid: {"enabled": cfg["enabled"], "poll_interval": cfg["poll_interval"]}
+            for tid, cfg in _topo_config.items()
+        },
+    })
 
 
 @app.route("/api/polling/toggle", methods=["POST"])
@@ -2003,6 +2082,21 @@ def api_polling_toggle():
     state = "paused" if _polling_paused else "resumed"
     log.info(f"Auto-polling {state}")
     return jsonify({"paused": _polling_paused, "status": state})
+
+
+@app.route("/api/polling/config", methods=["POST"])
+def api_polling_config():
+    """Update per-topology polling config (enabled, poll_interval)."""
+    data = request.get_json(force=True) or {}
+    tid = data.get("topology")
+    if not tid or tid not in _topo_config:
+        return jsonify({"error": "invalid topology"}), 400
+    if "enabled" in data:
+        _topo_config[tid]["enabled"] = bool(data["enabled"])
+    if "poll_interval" in data:
+        _topo_config[tid]["poll_interval"] = max(60, min(3600, int(data["poll_interval"])))
+    log.info(f"Topology [{tid}] config updated: {_topo_config[tid]}")
+    return jsonify({"topology": tid, **_topo_config[tid]})
 
 
 @app.route("/api/bastion/list")

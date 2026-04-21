@@ -199,6 +199,12 @@
           <i class="bi bi-file-earmark-bar-graph me-1"></i>Reports
         </button>
       </li>
+      <li class="nav-item">
+        <button class="nav-link" id="mainTabStatus"
+                onclick="switchMainTab('status')">
+          <i class="bi bi-activity me-1"></i>Status
+        </button>
+      </li>
     </ul>
   </div>
 </div>
@@ -239,7 +245,86 @@
   </div>
 </div>
 
+<!-- Per-topology polling controls -->
+<div id="topoPollingBar" class="container-fluid px-4 py-2" style="background:#161b22;border-bottom:1px solid #30363d;display:none">
+  <div class="d-flex align-items-center gap-3 flex-wrap">
+    <span style="font-size:.78rem;color:#8b949e" id="topoPollingLabel">Polling:</span>
+    <button class="btn btn-sm" id="btnTopoPolling" onclick="toggleTopoPolling()" style="font-size:.75rem">
+      <i class="bi bi-toggle-off me-1" id="topoPollingIcon"></i><span id="topoPollingState">Disabled</span>
+    </button>
+    <span style="font-size:.78rem;color:#8b949e">Interval:</span>
+    <select class="form-select form-select-sm" id="topoIntervalSelect" onchange="changeTopoInterval()"
+            style="max-width:120px;font-size:.78rem">
+      <option value="60">1 min</option>
+      <option value="120">2 min</option>
+      <option value="300">5 min</option>
+      <option value="600">10 min</option>
+      <option value="900" selected>15 min</option>
+      <option value="1800">30 min</option>
+      <option value="3600">1 hour</option>
+    </select>
+  </div>
+</div>
+
 <!-- Reports panel -->
+<!-- Status panel -->
+<div id="statusPanel" class="container-fluid px-4 mt-3" style="display:none">
+  <h5 class="mb-3"><i class="bi bi-activity me-2"></i>System Status</h5>
+  <div class="row g-3">
+    <!-- Polling Status -->
+    <div class="col-12 col-md-6">
+      <div class="tbl-wrap p-3">
+        <h6 class="mb-2"><i class="bi bi-lightning me-2 text-primary"></i>Polling</h6>
+        <table class="table table-sm mb-0" style="background:transparent;font-size:.82rem">
+          <tbody>
+            <tr><td class="text-muted" style="width:40%">State</td><td id="stState">—</td></tr>
+            <tr><td class="text-muted">Auto-polling</td><td id="stPaused">—</td></tr>
+            <tr><td class="text-muted">Poll Interval</td><td id="stInterval">—</td></tr>
+            <tr><td class="text-muted">Max Workers</td><td id="stWorkers">—</td></tr>
+            <tr><td class="text-muted">Total Devices</td><td id="stTotal">—</td></tr>
+            <tr><td class="text-muted">Completed</td><td id="stCompleted">—</td></tr>
+            <tr><td class="text-muted">Waiting</td><td id="stWaiting">—</td></tr>
+            <tr><td class="text-muted">Started At</td><td id="stStarted">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <!-- Threads & DB -->
+    <div class="col-12 col-md-6">
+      <div class="tbl-wrap p-3 mb-3">
+        <h6 class="mb-2"><i class="bi bi-cpu me-2 text-warning"></i>Threads</h6>
+        <table class="table table-sm mb-0" style="background:transparent;font-size:.82rem">
+          <tbody>
+            <tr><td class="text-muted" style="width:40%">Active Threads</td><td id="stThreads">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="tbl-wrap p-3">
+        <h6 class="mb-2"><i class="bi bi-database me-2 text-success"></i>Database</h6>
+        <table class="table table-sm mb-0" style="background:transparent;font-size:.82rem">
+          <tbody>
+            <tr><td class="text-muted" style="width:40%">Devices</td><td id="stDbDevices">—</td></tr>
+            <tr><td class="text-muted">Memory Samples</td><td id="stDbSamples">—</td></tr>
+            <tr><td class="text-muted">Device Checks</td><td id="stDbChecks">—</td></tr>
+            <tr><td class="text-muted">Active Recordings</td><td id="stDbRecordings">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <!-- Polling progress bar -->
+  <div class="mt-3" id="stProgressWrap" style="display:none">
+    <div class="d-flex align-items-center gap-2 mb-1">
+      <span class="text-muted" style="font-size:.78rem">Poll Progress</span>
+      <span id="stProgressLabel" style="font-size:.78rem">—</span>
+    </div>
+    <div class="progress" style="height:8px;background:#21262d;border-radius:4px">
+      <div class="progress-bar" id="stProgressBar" role="progressbar" style="width:0%;background:#1f6feb"></div>
+    </div>
+  </div>
+  <div class="text-muted mt-3" style="font-size:.72rem">Auto-refreshes every 3 seconds while visible</div>
+</div>
+
 <div id="reportsPanel" class="container-fluid px-4 mt-3">
   <!-- Active recordings (live) -->
   <div id="activeRecordingsSection" style="display:none;margin-bottom:1.25rem">
@@ -490,25 +575,39 @@ const TOPO_LABELS = {
   standard_testbeds: "Standard Testbeds",
 };
 
+let _statusTimer = null;
+
 function switchMainTab(which) {
   const isSC       = which === "sc";
   const isStandard = which === "standard";
   const isReports  = which === "reports";
+  const isStatus   = which === "status";
 
   // Stop live-report auto-refresh timer when leaving the reports tab
   if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
+  // Stop status refresh when leaving
+  if (_statusTimer) { clearInterval(_statusTimer); _statusTimer = null; }
 
   document.getElementById("mainTabChennai").classList.toggle("active", which === "chennai");
   document.getElementById("mainTabSC").classList.toggle("active", isSC);
   document.getElementById("mainTabStandard").classList.toggle("active", isStandard);
   document.getElementById("mainTabReports").classList.toggle("active", isReports);
+  document.getElementById("mainTabStatus").classList.toggle("active", isStatus);
 
   document.getElementById("scSubNav").style.display         = isSC       ? "block" : "none";
   document.getElementById("standardSubNav").style.display   = isStandard ? "block" : "none";
   if (!isStandard) document.getElementById("bastionAddPanel").style.display = "none";
   document.getElementById("reportsPanel").style.display       = isReports  ? "block" : "none";
-  document.getElementById("mainContent").style.display        = isReports  ? "none"  : "block";
-  document.getElementById("topoLabel").style.display          = isReports  ? "none"  : "block";
+  document.getElementById("statusPanel").style.display        = isStatus   ? "block" : "none";
+  document.getElementById("mainContent").style.display        = (isReports || isStatus) ? "none"  : "block";
+  document.getElementById("topoLabel").style.display          = (isReports || isStatus) ? "none"  : "block";
+  document.getElementById("topoPollingBar").style.display     = (isReports || isStatus || isStandard) ? "none" : "block";
+
+  if (isStatus) {
+    loadStatus();
+    _statusTimer = setInterval(loadStatus, 3000);
+    return;
+  }
 
   if (isReports) {
     loadReports();
@@ -1604,11 +1703,82 @@ function updatePollStatus(paused) {
   }
 }
 
+let _topoPollingCache = {};  // cached per-topology config
+
 async function checkPollStatus() {
   try {
     const d = await fetch("/api/polling/status").then(r => r.json());
     updatePollStatus(d.paused);
+    _topoPollingCache = d.topologies || {};
+    updateTopoPollingBar();
   } catch(e) {}
+}
+
+function _getActiveTopoIds() {
+  // For SC tabs, return all sc_tb* topologies as a group
+  if (currentTopology.startsWith("sc_tb")) return ["sc_tb1","sc_tb2","sc_tb3","sc_tb4","sc_tb5"];
+  return [currentTopology];
+}
+
+function updateTopoPollingBar() {
+  const bar = document.getElementById("topoPollingBar");
+  // Only show for chennai and sc tabs (not standard_testbeds, reports, status)
+  if (currentTopology !== "chennai" && !currentTopology.startsWith("sc_tb")) {
+    bar.style.display = "none";
+    return;
+  }
+  bar.style.display = "block";
+  const topoIds = _getActiveTopoIds();
+  // Use first topology's config as representative (SC topologies share settings)
+  const cfg = _topoPollingCache[topoIds[0]] || {enabled: true, poll_interval: 900};
+  const btn = document.getElementById("btnTopoPolling");
+  const icon = document.getElementById("topoPollingIcon");
+  const state = document.getElementById("topoPollingState");
+  if (cfg.enabled) {
+    btn.className = "btn btn-sm btn-outline-success";
+    icon.className = "bi bi-toggle-on me-1";
+    state.textContent = "Enabled";
+  } else {
+    btn.className = "btn btn-sm btn-outline-danger";
+    icon.className = "bi bi-toggle-off me-1";
+    state.textContent = "Disabled";
+  }
+  const sel = document.getElementById("topoIntervalSelect");
+  sel.value = String(cfg.poll_interval);
+  // If value not in options, select closest
+  if (sel.value !== String(cfg.poll_interval)) {
+    sel.value = "900";
+  }
+}
+
+async function toggleTopoPolling() {
+  const topoIds = _getActiveTopoIds();
+  const cfg = _topoPollingCache[topoIds[0]] || {enabled: true};
+  const newEnabled = !cfg.enabled;
+  for (const tid of topoIds) {
+    await fetch("/api/polling/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({topology: tid, enabled: newEnabled})
+    });
+    _topoPollingCache[tid] = {...(_topoPollingCache[tid] || {}), enabled: newEnabled};
+  }
+  updateTopoPollingBar();
+  toast(newEnabled ? "Polling enabled" : "Polling disabled");
+}
+
+async function changeTopoInterval() {
+  const interval = parseInt(document.getElementById("topoIntervalSelect").value);
+  const topoIds = _getActiveTopoIds();
+  for (const tid of topoIds) {
+    await fetch("/api/polling/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({topology: tid, poll_interval: interval})
+    });
+    _topoPollingCache[tid] = {...(_topoPollingCache[tid] || {}), poll_interval: interval};
+  }
+  toast(`Poll interval set to ${interval}s`);
 }
 
 // ── Recording ─────────────────────────────────────────────────────────────────
@@ -2386,9 +2556,48 @@ function closeReportDetail() {
 }
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
+// ── Status tab ──────────────────────────────────────────────────────────────
+async function loadStatus() {
+  try {
+    const d = await fetch("/api/status").then(r => r.json());
+    const p = d.poll;
+    const stateColor = p.state === 'polling' ? '#1f6feb' : p.state === 'idle' ? '#3fb950' : '#d29922';
+    document.getElementById("stState").innerHTML = `<span style="color:${stateColor};font-weight:600">${p.state.toUpperCase()}</span>`;
+    document.getElementById("stPaused").innerHTML = p.paused
+      ? '<span style="color:#d29922;font-weight:600">PAUSED</span>'
+      : '<span style="color:#3fb950">Active</span>';
+    document.getElementById("stInterval").textContent = `${p.poll_interval}s (${(p.poll_interval/60).toFixed(0)} min)`;
+    document.getElementById("stWorkers").textContent = p.poll_workers;
+    document.getElementById("stTotal").textContent = p.total_devices;
+    document.getElementById("stCompleted").textContent = p.completed;
+    const waitColor = p.waiting > 0 ? '#d29922' : '#3fb950';
+    document.getElementById("stWaiting").innerHTML = `<span style="color:${waitColor};font-weight:600">${p.waiting}</span>`;
+    document.getElementById("stStarted").textContent = p.started_at ? fmtTime(p.started_at) : '—';
+
+    document.getElementById("stThreads").textContent = d.threads.active;
+
+    document.getElementById("stDbDevices").textContent = d.db.devices.toLocaleString();
+    document.getElementById("stDbSamples").textContent = d.db.memory_samples.toLocaleString();
+    document.getElementById("stDbChecks").textContent = d.db.device_checks.toLocaleString();
+    document.getElementById("stDbRecordings").textContent = d.db.active_recordings;
+
+    // Progress bar
+    const pw = document.getElementById("stProgressWrap");
+    if (p.state === 'polling' && p.total_devices > 0) {
+      pw.style.display = 'block';
+      const pct = Math.round(p.completed / p.total_devices * 100);
+      document.getElementById("stProgressBar").style.width = pct + '%';
+      document.getElementById("stProgressLabel").textContent = `${p.completed} / ${p.total_devices} (${pct}%)`;
+    } else {
+      pw.style.display = 'none';
+    }
+  } catch(e) { console.error("loadStatus:", e); }
+}
+
 async function refreshAll() {
   await Promise.all([loadSummary(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis()]);
   checkRecordingStatus();
+  updateTopoPollingBar();
   // Refresh active-recordings section if Reports tab is visible
   if (document.getElementById("reportsPanel").style.display !== "none" && activeReportId === null) {
     loadActiveRecordings();
