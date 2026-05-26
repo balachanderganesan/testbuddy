@@ -35,6 +35,28 @@ python3 app.py
 
 Open **http://localhost:5001** in your browser.
 
+## Production Deploy
+
+Use the included deployment helper on the production host after the repo has been copied or checked out there:
+
+```bash
+cd /path/to/testbuddy
+chmod +x deploy_prod.sh
+APP_USER=testbuddy APP_GROUP=testbuddy TESTBUDDY_HOST=0.0.0.0 TESTBUDDY_PORT=5001 ./deploy_prod.sh
+```
+
+What it does:
+- Creates or reuses `.venv`
+- Installs Python dependencies from `requirements.txt`
+- Creates `/etc/systemd/system/testbuddy.service`
+- Enables and restarts the service
+
+Useful overrides:
+- `SERVICE_NAME` to change the systemd unit name
+- `APP_USER` / `APP_GROUP` to run the service as a specific account
+- `PYTHON_BIN` to choose a specific Python interpreter
+- `TESTBUDDY_HOST` / `TESTBUDDY_PORT` to control the bind address without editing `app.py`
+
 ## Requirements
 
 - Python 3.8+

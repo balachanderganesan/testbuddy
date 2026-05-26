@@ -15,6 +15,7 @@ REST API consumed by the dashboard frontend.
 """
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -2465,10 +2466,12 @@ def api_report_delete(report_id):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    web_host = os.getenv("TESTBUDDY_HOST", "0.0.0.0")
+    web_port = int(os.getenv("TESTBUDDY_PORT", "5001"))
     log.info("Initialising database...")
     init_db()
     log.info("Starting background collector...")
     threading.Thread(target=background_loop, daemon=True).start()
     threading.Thread(target=recording_poll_manager, daemon=True).start()
-    log.info("Starting web server on http://0.0.0.0:5001")
-    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)
+    log.info("Starting web server on http://%s:%s", web_host, web_port)
+    app.run(host=web_host, port=web_port, debug=False, threaded=True)
