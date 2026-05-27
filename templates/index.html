@@ -2560,6 +2560,9 @@ function renderReportDetail(data, container) {
     el.innerHTML = '<div class="text-muted text-center py-4">No device data in this recording window.</div>';
     return;
   }
+  const reportCoreCounts = Object.fromEntries(
+    (data.core_alerts || []).map(a => [a.ip, a.core_count || 0])
+  );
   el.innerHTML = data.devices.map(dev => {
     const name     = dev.vm_name || dev.ip;
     const sm       = dev.summary;
@@ -2568,9 +2571,10 @@ function renderReportDetail(data, container) {
     const typeIcon = dev.device_type === "edge"
       ? '<i class="bi bi-cpu text-primary me-1"></i>'
       : '<i class="bi bi-diagram-3 text-success me-1"></i>';
-    const coreBadge = sm.core_count_max > 0
+    const newCoreCount = reportCoreCounts[dev.ip] || 0;
+    const coreBadge = newCoreCount > 0
       ? `<span class="badge badge-critical ms-1" style="font-size:.65rem">` +
-        `<i class="bi bi-bug-fill me-1"></i>${sm.core_count_max} cores</span>` : "";
+        `<i class="bi bi-bug-fill me-1"></i>${newCoreCount} cores</span>` : "";
     // Per-device check alert badges
     const devChecks = dev.check_alerts || [];
     const checkBadges = devChecks.map(ca => {

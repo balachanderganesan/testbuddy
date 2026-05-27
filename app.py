@@ -1310,6 +1310,11 @@ def _memory_alert_first_seen(conn, device_id, pid, current_alert):
     return streak_start
 
 
+def _iso_to_epoch_seconds(ts):
+    """Convert our naive-UTC ISO timestamps to epoch seconds."""
+    return int((_parse_ts(ts) - datetime(1970, 1, 1)).total_seconds())
+
+
 # Max chart data points per device embedded in reports. Beyond this, samples are
 # downsampled evenly so the HTML file stays a manageable size.
 MAX_CHART_SAMPLES = 500
@@ -1331,6 +1336,8 @@ def _build_report_data(session_id):
         start  = session["started_at"]
         # For active sessions, use current time as the window end
         stop   = session["stopped_at"] or datetime.utcnow().isoformat()
+        start_epoch = _iso_to_epoch_seconds(start)
+        stop_epoch  = _iso_to_epoch_seconds(stop)
         hv_id  = session.get("hypervisor_id")
 
         # Device filter: specific hypervisor (per-bastion) or whole topology
@@ -1404,9 +1411,6 @@ def _build_report_data(session_id):
     for dev in result_devices:
         all_samples = dev.pop("_all_samples")
         if dev["summary"]["core_count_max"] > 0:
-            first_core_ts = next(
-                (s["ts"] for s in all_samples if (s["core_count"] or 0) > 0), None
-            )
             # Collect unique core file names seen across all samples
             seen_files = {}
             for s in all_samples:
@@ -1419,8 +1423,11 @@ def _build_report_data(session_id):
                     continue
                 for f in (files if isinstance(files, list) else []):
                     fname = f.get("name", "")
-                    if fname and fname not in seen_files:
-                        ts_val = f.get("ts", 0)
+                    ts_val = int(f.get("ts", 0) or 0)
+                    if (
+                        fname and fname not in seen_files and
+                        start_epoch <= ts_val <= stop_epoch
+                    ):
                         seen_files[fname] = {
                             "name": fname,
                             "file_ts": ts_val,
@@ -1439,8 +1446,11 @@ def _build_report_data(session_id):
                     continue
                 for f in (files if isinstance(files, list) else []):
                     fname = f.get("name", "")
-                    if fname and fname not in ha_seen_files:
-                        ts_val = f.get("ts", 0)
+                    ts_val = int(f.get("ts", 0) or 0)
+                    if (
+                        fname and fname not in ha_seen_files and
+                        start_epoch <= ts_val <= stop_epoch
+                    ):
                         ha_seen_files[fname] = {
                             "name": fname,
                             "file_ts": ts_val,
@@ -1448,14 +1458,21 @@ def _build_report_data(session_id):
                             "first_poll": s["ts"],
                         }
 
-            core_alerts.append({
-                "device_name":   dev.get("vm_name") or dev["ip"],
-                "ip":            dev["ip"],
-                "core_count":    dev["summary"]["core_count_max"],
-                "first_seen":    first_core_ts,
-                "core_files":    list(seen_files.values()),
-                "ha_core_files": list(ha_seen_files.values()),
-            })
+            filtered_files = list(seen_files.values())
+            filtered_ha_files = list(ha_seen_files.values())
+            if filtered_files or filtered_ha_files:
+                first_seen = min(
+                    [f["first_poll"] for f in filtered_files + filtered_ha_files if f.get("first_poll")],
+                    default=None,
+                )
+                core_alerts.append({
+                    "device_name":   dev.get("vm_name") or dev["ip"],
+                    "ip":            dev["ip"],
+                    "core_count":    len(filtered_files) + len(filtered_ha_files),
+                    "first_seen":    first_seen,
+                    "core_files":    filtered_files,
+                    "ha_core_files": filtered_ha_files,
+                })
 
     # Strip core_files_json from chart samples to reduce payload size
     for dev in result_devices:
@@ -1469,14 +1486,23 @@ def _build_report_data(session_id):
         check_alerts_data = []
         if device_ids:
             ph = ",".join("?" * len(device_ids))
-            # Deduplicate: for each (device, check_type, alert_detail) group
-            # keep only one row with first_seen/last_seen and occurrence count.
-            check_rows = [dict(r) for r in conn.execute(f"""
-                SELECT dc.device_id, dc.check_type, dc.alert_level,
-                       dc.alert_detail,
-                       MIN(dc.ts) AS first_seen,
-                       MAX(dc.ts) AS last_seen,
-                       COUNT(*)   AS occurrences,
+            raw_check_rows = [dict(r) for r in conn.execute(f"""
+                SELECT dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail, dc.ts,
+                       (
+                           SELECT MIN(dc3.ts)
+                           FROM device_checks dc3
+                           WHERE dc3.device_id = dc.device_id
+                             AND dc3.check_type = dc.check_type
+                             AND dc3.alert_level != 'ok'
+                             AND dc3.ts > COALESCE((
+                                 SELECT MAX(dc4.ts)
+                                 FROM device_checks dc4
+                                 WHERE dc4.device_id = dc.device_id
+                                   AND dc4.check_type = dc.check_type
+                                   AND dc4.alert_level = 'ok'
+                                   AND dc4.ts < dc.ts
+                             ), '')
+                       ) AS streak_first_seen,
                        d.device_type, d.ip, d.vm_name,
                        h.name AS hypervisor_name
                 FROM device_checks dc
@@ -1485,11 +1511,48 @@ def _build_report_data(session_id):
                 WHERE dc.device_id IN ({ph})
                   AND dc.ts >= ? AND dc.ts <= ?
                   AND dc.alert_level != 'ok'
-                GROUP BY dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail
                 ORDER BY
                   CASE dc.alert_level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-                  MAX(dc.ts) DESC
+                  dc.ts DESC
             """, (*device_ids, start, stop)).fetchall()]
+
+            grouped_checks = {}
+            for row in raw_check_rows:
+                streak_first_seen = row.get("streak_first_seen") or row["ts"]
+                if streak_first_seen < start:
+                    continue
+                key = (
+                    row["device_id"], row["check_type"], row["alert_level"],
+                    row["alert_detail"], streak_first_seen,
+                )
+                grp = grouped_checks.setdefault(key, {
+                    "device_id": row["device_id"],
+                    "check_type": row["check_type"],
+                    "alert_level": row["alert_level"],
+                    "alert_detail": row["alert_detail"],
+                    "first_seen": streak_first_seen,
+                    "last_seen": row["ts"],
+                    "occurrences": 0,
+                    "device_type": row["device_type"],
+                    "ip": row["ip"],
+                    "vm_name": row["vm_name"],
+                    "hypervisor_name": row["hypervisor_name"],
+                })
+                grp["occurrences"] += 1
+                if row["ts"] > grp["last_seen"]:
+                    grp["last_seen"] = row["ts"]
+
+            severity_rank = {"critical": 0, "warning": 1}
+            check_rows = sorted(
+                grouped_checks.values(),
+                key=lambda r: (
+                    severity_rank.get(r["alert_level"], 2),
+                    -_iso_to_epoch_seconds(r["last_seen"]),
+                    r.get("vm_name") or r["ip"],
+                    r["check_type"],
+                    r.get("alert_detail") or "",
+                ),
+            )
 
             for cr in check_rows:
                 cr["ts"] = cr["last_seen"]
