@@ -53,6 +53,9 @@
     /* Cores badge */
     .cores-ok   { color:#3fb950; }
     .cores-warn { color:#f85149; font-weight:600; }
+    .core-download-link { text-decoration:none; }
+    .core-download-link:hover { text-decoration:none; }
+    .core-download-group { display:flex; flex-wrap:wrap; gap:.4rem; }
 
     /* HA badge */
     .ha-active   { color:#3fb950; }
@@ -496,6 +499,14 @@
         <!-- Stats row -->
         <div class="row g-2 mb-3" id="modalStats"></div>
 
+        <div id="modalCoreDownloads" class="mb-3" style="display:none">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <i class="bi bi-download text-info"></i>
+            <strong style="font-size:.85rem">Core Dumps</strong>
+          </div>
+          <div id="modalCoreDownloadsContent"></div>
+        </div>
+
         <!-- HA panel (shown when HA peer exists) -->
         <div id="modalHaPanel" class="ha-panel mb-3" style="display:none">
           <div class="d-flex align-items-center mb-2 gap-2">
@@ -659,12 +670,66 @@ function getVmDisplayName(dev) {
 }
 
 // ── Core file popover ─────────────────────────────────────────────────────────
-function renderCoresBadge(count, files) {
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function coreDownloadUrl(deviceId, fileName, isHa=false) {
+  return `/api/device/${deviceId}/core/download?name=${encodeURIComponent(fileName)}${isHa ? "&ha=1" : ""}`;
+}
+
+function renderCoreDownloadLink(deviceId, fileName, isHa=false, compact=true) {
+  const cls = compact
+    ? "btn btn-sm btn-outline-primary py-0 px-1 ms-1 core-download-link"
+    : "btn btn-sm btn-outline-primary core-download-link";
+  const label = compact
+    ? '<i class="bi bi-download"></i>'
+    : '<i class="bi bi-download me-1"></i>Download';
+  const title = isHa ? "Download HA standby core dump" : "Download core dump";
+  return `<a class="${cls}" href="${coreDownloadUrl(deviceId, fileName, isHa)}"
+             onclick="event.stopPropagation()" title="${title}"
+             target="_blank" rel="noopener">${label}</a>`;
+}
+
+function sortCoreEntries(files) {
+  return [...(files || [])].sort((a, b) => {
+    const ta = Number(a?.ts || 0);
+    const tb = Number(b?.ts || 0);
+    if (tb !== ta) return tb - ta;
+    return String(a?.name || "").localeCompare(String(b?.name || ""));
+  });
+}
+
+function latestCoreTs(files) {
+  return sortCoreEntries(files)[0]?.ts || 0;
+}
+
+function renderCoreFilePills(deviceId, files, options={}) {
+  const isHa = options.ha === true;
+  if (!files || !files.length) return "";
+  return sortCoreEntries(files).map(f => {
+    const dt = f.ts ? new Date(f.ts * 1000).toLocaleString() : "?";
+    const haTag = isHa
+      ? '<span class="badge bg-secondary ms-1" style="font-size:.6rem">HA</span>'
+      : "";
+    return `<span class="pill"><code class="text-warning" style="font-size:.75rem">${escapeHtml(f.name)}</code>${haTag}` +
+           `${renderCoreDownloadLink(deviceId, f.name, isHa)}<small class="text-muted ms-1">${dt}</small></span>`;
+  }).join(" ");
+}
+
+function renderCoresBadge(deviceId, count, files, options={}) {
   if (count == null) return "—";
   if (count === 0) return '<span class="cores-ok">0</span>';
   const encoded = encodeURIComponent(JSON.stringify(files || []));
+  const isHa = options.ha === true ? "1" : "0";
   return `<span class="cores-badge cores-warn" style="cursor:pointer" tabindex="0"
-               data-count="${count}" data-cores="${encoded}"
+               data-count="${count}" data-cores="${encoded}" data-device-id="${deviceId}"
+               data-ha="${isHa}"
                onclick="event.stopPropagation();showCorePopover(this)">
             <i class="bi bi-bug-fill me-1"></i>${count}
           </span>`;
@@ -683,14 +748,19 @@ function showCorePopover(el) {
     activeCorePopover = null; activeCoreElement = null;
   }
   const count = el.dataset.count;
-  const files = JSON.parse(decodeURIComponent(el.dataset.cores || '%5B%5D'));
+  const deviceId = el.dataset.deviceId;
+  const isHa = el.dataset.ha === "1";
+  const files = sortCoreEntries(JSON.parse(decodeURIComponent(el.dataset.cores || '%5B%5D')));
   let html = '<div style="max-height:220px;overflow-y:auto"><ul class="list-unstyled mb-0">';
   if (files.length) {
     files.forEach(f => {
       const dt = f.ts ? new Date(f.ts * 1000).toLocaleString() : 'Unknown time';
       html += `<li class="mb-2">
-        <code class="text-warning" style="font-size:.8rem">${f.name}</code><br>
-        <small class="text-muted">${dt}</small>
+        <div><code class="text-warning" style="font-size:.8rem">${escapeHtml(f.name)}</code></div>
+        <div class="d-flex align-items-center justify-content-between gap-2 mt-1">
+          <small class="text-muted">${dt}</small>
+          ${renderCoreDownloadLink(deviceId, f.name, isHa, false)}
+        </div>
       </li>`;
     });
   } else {
@@ -767,8 +837,14 @@ async function loadSummary() {
 
 // ── Core dumps banner ─────────────────────────────────────────────────────────
 function updateCoresBanner() {
-  const devWithCores = allDevices.filter(d =>
-    (d.core_files?.length || 0) + (d.ha_core_files?.length || 0) > 0);
+  const devWithCores = allDevices
+    .filter(d => (d.core_files?.length || 0) + (d.ha_core_files?.length || 0) > 0)
+    .sort((a, b) => {
+      const latestA = Math.max(latestCoreTs(a.core_files), latestCoreTs(a.ha_core_files));
+      const latestB = Math.max(latestCoreTs(b.core_files), latestCoreTs(b.ha_core_files));
+      if (latestB !== latestA) return latestB - latestA;
+      return getVmDisplayName(a).localeCompare(getVmDisplayName(b));
+    });
 
   const banner = document.getElementById("coresBanner");
   const list   = document.getElementById("coresList");
@@ -786,12 +862,17 @@ function updateCoresBanner() {
     const allFiles = [
       ...coreFiles.map(f => ({f, ha: false})),
       ...haCoreFiles.map(f => ({f, ha: true})),
-    ];
+    ].sort((a, b) => {
+      const ta = Number(a.f?.ts || 0);
+      const tb = Number(b.f?.ts || 0);
+      if (tb !== ta) return tb - ta;
+      return String(a.f?.name || "").localeCompare(String(b.f?.name || ""));
+    });
     const filesHtml = allFiles.map(({f, ha}) => {
       const dt    = f.ts ? new Date(f.ts * 1000).toLocaleString() : '?';
       const haTag = ha ? '<span class="badge bg-secondary ms-1" style="font-size:.6rem">HA</span>' : '';
-      return `<span class="pill"><code class="text-warning" style="font-size:.75rem">${f.name}</code>${haTag}` +
-             `<small class="text-muted ms-1">${dt}</small></span>`;
+      return `<span class="pill"><code class="text-warning" style="font-size:.75rem">${escapeHtml(f.name)}</code>${haTag}` +
+             `${renderCoreDownloadLink(d.id, f.name, ha)}<small class="text-muted ms-1">${dt}</small></span>`;
     }).join(' ');
 
     return `<div class="alert-item d-flex align-items-center gap-2 flex-wrap">
@@ -948,7 +1029,7 @@ function renderTable(devices) {
     const cpu = cur && cur.cpu_pct != null ? `${cur.cpu_pct.toFixed(1)}%` : "—";
 
     // Cores
-    const cores = renderCoresBadge(cur?.core_count, dev.core_files);
+    const cores = renderCoresBadge(dev.id, cur?.core_count, dev.core_files);
 
     // HA peer
     let haCell = '<span class="ha-none">—</span>';
@@ -958,7 +1039,7 @@ function renderTable(devices) {
         const hColor = freeColor(hFree);
         const haCoreFiles = dev.ha_core_files || [];
         const hCores = haCoreFiles.length > 0
-          ? renderCoresBadge(haCoreFiles.length, haCoreFiles)
+          ? renderCoresBadge(dev.id, haCoreFiles.length, haCoreFiles, {ha: true})
           : "";
         haCell = `<span class="ha-standby" title="Standby free: ${hFree}%">
           Standby <span style="color:${hColor}">${hFree}%</span> ${hCores}</span>`;
@@ -1520,6 +1601,8 @@ async function loadHistory(hours) {
   const st         = dev2?.memory;
   const coreFiles  = dev2?.core_files   || [];
   const haCoreFiles= dev2?.ha_core_files|| [];
+  const modalCorePanel = document.getElementById("modalCoreDownloads");
+  const modalCoreContent = document.getElementById("modalCoreDownloadsContent");
   if (st) {
     document.getElementById("modalAlert").innerHTML =
       `<span class="badge ${alertBadgeClass(st.alert)} me-2">${alertLabel(st.alert)}</span>` +
@@ -1536,8 +1619,21 @@ async function loadHistory(hours) {
         statCard("Available",   fmtMB(cur.mem_available_kb), "bi-check2-circle", "#3fb950"),
         statCard("CPU %",       cur.cpu_pct != null ? cur.cpu_pct.toFixed(1)+"%" : "—", "bi-cpu-fill"),
         statCard("Uptime",      fmtUptime(cur.process_uptime_sec), "bi-clock"),
-        statCard("Cores",       renderCoresBadge(coreFiles.length, coreFiles), "bi-bug", coreFiles.length > 0 ? "#f85149" : "#3fb950"),
+        statCard("Cores",       renderCoresBadge(activeDeviceId, coreFiles.length, coreFiles), "bi-bug", coreFiles.length > 0 ? "#f85149" : "#3fb950"),
       ].join("");
+    }
+
+    const activeCoreHtml = renderCoreFilePills(activeDeviceId, coreFiles);
+    const haCoreHtml = renderCoreFilePills(activeDeviceId, haCoreFiles, {ha: true});
+    if (activeCoreHtml || haCoreHtml) {
+      modalCorePanel.style.display = "block";
+      modalCoreContent.innerHTML = [
+        activeCoreHtml ? `<div class="mb-2"><div class="text-muted mb-1" style="font-size:.72rem">Active device</div><div class="core-download-group">${activeCoreHtml}</div></div>` : "",
+        haCoreHtml ? `<div><div class="text-muted mb-1" style="font-size:.72rem">HA standby</div><div class="core-download-group">${haCoreHtml}</div></div>` : "",
+      ].join("");
+    } else {
+      modalCorePanel.style.display = "none";
+      modalCoreContent.innerHTML = "";
     }
 
     // HA panel
@@ -1550,11 +1646,14 @@ async function loadHistory(hours) {
         statCard("HA Avail",  fmtMB(ha.mem_available_kb), "bi-check2-circle"),
         statCard("HA CPU %",  ha.cpu_pct != null ? ha.cpu_pct.toFixed(1)+"%" : "—", "bi-cpu-fill"),
         statCard("HA Uptime", fmtUptime(ha.process_uptime_sec), "bi-clock"),
-        statCard("HA Cores",  renderCoresBadge(haCoreFiles.length, haCoreFiles), "bi-bug", haCoreFiles.length > 0 ? "#f85149" : "#3fb950"),
+        statCard("HA Cores",  renderCoresBadge(activeDeviceId, haCoreFiles.length, haCoreFiles, {ha: true}), "bi-bug", haCoreFiles.length > 0 ? "#f85149" : "#3fb950"),
       ].join("");
     } else {
       haPanel.style.display = "none";
     }
+  } else {
+    modalCorePanel.style.display = "none";
+    modalCoreContent.innerHTML = "";
   }
 
   buildChart(samples, pid, hours);
@@ -1715,8 +1814,7 @@ async function checkPollStatus() {
 }
 
 function _getActiveTopoIds() {
-  // For SC tabs, return all sc_tb* topologies as a group
-  if (currentTopology.startsWith("sc_tb")) return ["sc_tb1","sc_tb2","sc_tb3","sc_tb4","sc_tb5"];
+  // Polling config is scoped to the currently selected topology/TB.
   return [currentTopology];
 }
 
@@ -1729,7 +1827,6 @@ function updateTopoPollingBar() {
   }
   bar.style.display = "block";
   const topoIds = _getActiveTopoIds();
-  // Use first topology's config as representative (SC topologies share settings)
   const cfg = _topoPollingCache[topoIds[0]] || {enabled: true, poll_interval: 900};
   const btn = document.getElementById("btnTopoPolling");
   const icon = document.getElementById("topoPollingIcon");
@@ -1764,7 +1861,8 @@ async function toggleTopoPolling() {
     _topoPollingCache[tid] = {...(_topoPollingCache[tid] || {}), enabled: newEnabled};
   }
   updateTopoPollingBar();
-  toast(newEnabled ? "Polling enabled" : "Polling disabled");
+  const topoLabel = TOPO_LABELS[topoIds[0]] || topoIds[0];
+  toast(`${topoLabel}: polling ${newEnabled ? "enabled" : "disabled"}`);
 }
 
 async function changeTopoInterval() {
@@ -1778,7 +1876,8 @@ async function changeTopoInterval() {
     });
     _topoPollingCache[tid] = {...(_topoPollingCache[tid] || {}), poll_interval: interval};
   }
-  toast(`Poll interval set to ${interval}s`);
+  const topoLabel = TOPO_LABELS[topoIds[0]] || topoIds[0];
+  toast(`${topoLabel}: poll interval set to ${interval}s`);
 }
 
 // ── Recording ─────────────────────────────────────────────────────────────────
@@ -2252,11 +2351,23 @@ function _applyReportDetailData(data) {
   // Coredump alert banner
   let alertBanner = "";
   if (data.core_alerts && data.core_alerts.length > 0) {
-    const alerts = data.core_alerts.map(a => {
+    const alerts = [...data.core_alerts]
+      .sort((a, b) => {
+        const latestA = Math.max(latestCoreTs(a.core_files), latestCoreTs(a.ha_core_files), 0);
+        const latestB = Math.max(latestCoreTs(b.core_files), latestCoreTs(b.ha_core_files), 0);
+        if (latestB !== latestA) return latestB - latestA;
+        return (a.device_name || a.ip || "").localeCompare(b.device_name || b.ip || "");
+      })
+      .map(a => {
       let fileList = '';
       const files = (a.core_files || []).concat(
         (a.ha_core_files || []).map(f => ({...f, name: `[HA] ${f.name}`}))
-      );
+      ).sort((x, y) => {
+        const tx = Number(x?.file_ts || x?.ts || 0);
+        const ty = Number(y?.file_ts || y?.ts || 0);
+        if (ty !== tx) return ty - tx;
+        return String(x?.name || "").localeCompare(String(y?.name || ""));
+      });
       if (files.length) {
         fileList = `<div style="margin-left:1.5rem;font-size:.72rem;color:#8b949e;margin-top:2px">` +
           files.map(f => {

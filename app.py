@@ -15,8 +15,10 @@ REST API consumed by the dashboard frontend.
 """
 
 import json
+import mimetypes
 import os
 import re
+import shlex
 import sqlite3
 import threading
 import time
@@ -27,7 +29,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import paramiko
-from flask import Flask, jsonify, render_template, request, Response
+from flask import Flask, jsonify, render_template, request, Response, stream_with_context
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 BASE_DIR     = Path(__file__).parent
@@ -290,6 +292,49 @@ def ssh_run(ssh, cmd, timeout=None):
     t = timeout or SSH_TIMEOUT
     _, stdout, _ = ssh.exec_command(cmd, timeout=t)
     return stdout.read().decode("utf-8", errors="replace").strip()
+
+
+def _find_core_file_path(ssh, file_name):
+    """Locate a core dump path by basename on a device."""
+    safe_name = shlex.quote(file_name)
+    return ssh_run(
+        ssh,
+        "find /velocloud/core /velocloud/kcore -maxdepth 2 -type f "
+        "\\( -name '*.tgz' -o -name '*.gz' \\) "
+        f"-name {safe_name} -print -quit 2>/dev/null",
+        timeout=SSH_TIMEOUT,
+    )
+
+
+def _ha_proxy_command(inner_cmd):
+    """Run a command on the HA standby via the active edge."""
+    ha_ip = "169.254.2.2"
+    ssh_opt = "-o StrictHostKeyChecking=no -o LogLevel=ERROR"
+    quoted_inner = shlex.quote(inner_cmd)
+    key_cmd = (
+        f"ssh {ssh_opt} -o BatchMode=yes -o ConnectTimeout={HA_SSH_TIMEOUT} "
+        f"root@{ha_ip} {quoted_inner} 2>/dev/null"
+    )
+    pass_cmd = (
+        f"sshpass -p {shlex.quote(DEVICE_PASS)} ssh {ssh_opt} "
+        f"-o ConnectTimeout={HA_SSH_TIMEOUT} root@{ha_ip} {quoted_inner} 2>/dev/null"
+    )
+    return f"{key_cmd} || {pass_cmd}"
+
+
+def _find_ha_core_file_path(ssh, file_name):
+    safe_name = shlex.quote(file_name)
+    inner_cmd = (
+        "find /velocloud/core /velocloud/kcore -maxdepth 2 -type f "
+        "\\( -name '*.tgz' -o -name '*.gz' \\) "
+        f"-name {safe_name} -print -quit 2>/dev/null"
+    )
+    return ssh_run(ssh, _ha_proxy_command(inner_cmd), timeout=HA_SSH_TIMEOUT + 5)
+
+
+def _sanitize_download_name(name):
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name or "coredump")
+    return safe.strip("._") or "coredump"
 
 
 # ── Discovery ─────────────────────────────────────────────────────────────────
@@ -1742,6 +1787,137 @@ def api_device_history(device_id):
         "current_pid": current_pid,
         "samples":     [dict(s) for s in samples],
     })
+
+
+@app.route("/api/device/<int:device_id>/core/download")
+def api_device_core_download(device_id):
+    file_name = (request.args.get("name") or "").strip()
+    want_ha = (request.args.get("ha") or "").lower() in ("1", "true", "yes")
+    if not file_name:
+        return jsonify({"error": "missing core file name"}), 400
+
+    with get_db() as conn:
+        dev = conn.execute("""
+            SELECT d.id, d.device_type, d.ip, d.console_port, d.vm_name,
+                   d.core_files, d.ha_core_files,
+                   h.ip AS hypervisor_ip
+            FROM devices d
+            JOIN hypervisors h ON d.hypervisor_id = h.id
+            WHERE d.id = ?
+        """, (device_id,)).fetchone()
+
+    if not dev:
+        return jsonify({"error": "device not found"}), 404
+
+    dev = dict(dev)
+    files_json = dev["ha_core_files"] if want_ha else dev["core_files"]
+    files = json.loads(files_json or "[]")
+    allowed_names = {f.get("name") for f in files if isinstance(f, dict)}
+    if file_name not in allowed_names:
+        return jsonify({"error": "core file not found for device"}), 404
+
+    jump_ssh = None
+    sftp = None
+    remote_file = None
+    stdout = None
+    try:
+        jump_ssh = ssh_connect(
+            dev["hypervisor_ip"], dev["console_port"], DEVICE_USER, DEVICE_PASS
+        )
+        if want_ha:
+            remote_path = _find_ha_core_file_path(jump_ssh, file_name)
+            if not remote_path:
+                raise FileNotFoundError(file_name)
+            size_raw = ssh_run(
+                jump_ssh,
+                _ha_proxy_command(f"wc -c < {shlex.quote(remote_path)}"),
+                timeout=HA_SSH_TIMEOUT + 5,
+            )
+            _, stdout, _ = jump_ssh.exec_command(
+                _ha_proxy_command(f"cat {shlex.quote(remote_path)}"),
+                timeout=SSH_TIMEOUT + HA_SSH_TIMEOUT,
+            )
+            remote_stat_size = int(size_raw.strip() or "0")
+        else:
+            sftp_ssh = jump_ssh
+            remote_path = _find_core_file_path(sftp_ssh, file_name)
+            if not remote_path:
+                raise FileNotFoundError(file_name)
+            sftp = sftp_ssh.open_sftp()
+            remote_file = sftp.open(remote_path, "rb")
+            remote_stat_size = sftp.stat(remote_path).st_size
+    except FileNotFoundError:
+        if stdout:
+            stdout.close()
+        if remote_file:
+            remote_file.close()
+        if sftp:
+            sftp.close()
+        if jump_ssh:
+            jump_ssh.close()
+        return jsonify({"error": "core file is no longer present on the device"}), 404
+    except Exception as exc:
+        log.warning(
+            "Core download failed for device %s file %s (ha=%s): %s",
+            device_id, file_name, want_ha, exc,
+        )
+        if stdout:
+            stdout.close()
+        if remote_file:
+            remote_file.close()
+        if sftp:
+            sftp.close()
+        if jump_ssh:
+            jump_ssh.close()
+        return jsonify({"error": "unable to open core file"}), 502
+
+    attachment_name = _sanitize_download_name(
+        f"{dev['vm_name'] or dev['ip']}{'-ha' if want_ha else ''}-{file_name}"
+    )
+    mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+
+    def generate():
+        try:
+            if want_ha:
+                while True:
+                    chunk = stdout.channel.recv(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            else:
+                while True:
+                    chunk = remote_file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            try:
+                if stdout:
+                    stdout.close()
+            except Exception:
+                pass
+            try:
+                if remote_file:
+                    remote_file.close()
+            except Exception:
+                pass
+            try:
+                if sftp:
+                    sftp.close()
+            except Exception:
+                pass
+            try:
+                if jump_ssh:
+                    jump_ssh.close()
+            except Exception:
+                pass
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{attachment_name}"',
+        "Content-Length": str(remote_stat_size),
+        "Cache-Control": "no-store",
+    }
+    return Response(stream_with_context(generate()), mimetype=mime_type, headers=headers)
 
 
 @app.route("/api/alerts")
