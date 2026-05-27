@@ -2687,9 +2687,27 @@ def api_recording_start():
             """INSERT INTO recording_sessions
                (topology_id, hypervisor_id, label, started_at, status, poll_interval_sec, last_polled_at)
                VALUES(?,?,?,?,?,?,?)""",
-            (tid, hv_id, label, now, "recording", poll_interval, now)
+            (tid, hv_id, label, now, "recording", poll_interval, None)
         )
         session_id = cur.lastrowid
+    session = {
+        "id": session_id,
+        "topology_id": tid,
+        "hypervisor_id": hv_id,
+        "label": label,
+        "started_at": now,
+        "status": "recording",
+        "poll_interval_sec": poll_interval,
+        "last_polled_at": None,
+    }
+    # Capture the baseline sample immediately, then let the recording scheduler
+    # handle subsequent samples at the requested interval.
+    _rec_last_polled[session_id] = time.time()
+    threading.Thread(
+        target=_poll_recording_devices,
+        args=(session,),
+        daemon=True,
+    ).start()
     return jsonify({
         "id": session_id, "topology": tid, "hypervisor_id": hv_id,
         "started_at": now, "status": "recording", "poll_interval_sec": poll_interval,
