@@ -45,13 +45,22 @@ echo "Using service name: $SERVICE_NAME"
 echo "Using app user/group: $APP_USER:$APP_GROUP"
 echo "Using bind address: $TESTBUDDY_HOST:$TESTBUDDY_PORT"
 
-if [[ ! -d "$VENV_DIR" ]]; then
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    if [[ -d "$VENV_DIR" ]]; then
+        echo "Existing virtual environment at $VENV_DIR is incomplete; recreating it"
+        rm -rf "$VENV_DIR"
+    fi
     "$PYTHON_BIN" -m venv "$VENV_DIR"
     echo "Created virtual environment at $VENV_DIR"
 fi
 
-"$VENV_DIR/bin/pip" install --upgrade pip
-"$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt"
+if [[ ! -x "$VENV_DIR/bin/pip" ]]; then
+    echo "pip is missing from $VENV_DIR; bootstrapping it with ensurepip"
+    "$VENV_DIR/bin/python" -m ensurepip --upgrade
+fi
+
+"$VENV_DIR/bin/python" -m pip install --upgrade pip
+"$VENV_DIR/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
 
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TMP_UNIT="$(mktemp)"
