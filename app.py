@@ -1315,6 +1315,147 @@ def _iso_to_epoch_seconds(ts):
     return int((_parse_ts(ts) - datetime(1970, 1, 1)).total_seconds())
 
 
+def _coerce_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value, default=None):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _report_check_state(check_type, result):
+    """Return a compact, stable representation of a diagnostic check state."""
+    if check_type == "tunnel":
+        peers = []
+        total_dead = 0
+        total_unstable = 0
+        for entry in (result if isinstance(result, list) else []):
+            peer_type = entry.get("peer_type") or "UNKNOWN"
+            dead = _coerce_int(entry.get("dead"), 0)
+            unstable = _coerce_int(entry.get("unstable"), 0)
+            total_dead += dead
+            total_unstable += unstable
+            if dead or unstable:
+                peers.append({
+                    "peer_type": peer_type,
+                    "dead": dead,
+                    "unstable": unstable,
+                })
+        peers.sort(key=lambda p: p["peer_type"])
+        return {
+            "total_dead": total_dead,
+            "total_unstable": total_unstable,
+            "peers": peers,
+        }
+
+    if check_type == "route":
+        result = result if isinstance(result, dict) else {}
+        return {"total_routes": _coerce_int(result.get("_total_routes"), 0)}
+
+    if check_type == "path":
+        result = result if isinstance(result, dict) else {}
+        return {
+            "total_peer_count": _coerce_int(result.get("_total_peer_count"), 0),
+            "total_paths": _coerce_int(result.get("_total_paths"), 0),
+        }
+
+    if check_type in ("stale_pi", "stale_td", "ha_panic"):
+        result = result if isinstance(result, dict) else {}
+        return {"count": _coerce_int(result.get("count"), 0)}
+
+    if check_type == "health":
+        result = result if isinstance(result, dict) else {}
+        cpu_300 = _coerce_float(result.get("cpu_300s_avg_pct"))
+        mem_pct = _coerce_float(
+            result.get("edged_mem_usage_pct")
+            if result.get("edged_mem_usage_pct") is not None
+            else result.get("gatewayd_mem_usage_pct")
+        )
+        drops = _coerce_int(result.get("handoffq_drops"), 0)
+        cpu_state = "critical" if cpu_300 is not None and cpu_300 > 95 else (
+            "warning" if cpu_300 is not None and cpu_300 > 80 else "ok"
+        )
+        return {
+            "cpu_state": cpu_state,
+            "mem_warn": bool(mem_pct is not None and mem_pct > 85),
+            "handoff_drops": bool(drops > 0),
+        }
+
+    if check_type == "dpdk_leak":
+        result = result if isinstance(result, dict) else {}
+        return {"leak_count": _coerce_int(result.get("leak_count"), 0)}
+
+    return None
+
+
+def _report_check_state_summary(check_type, state):
+    """Human-readable check-state summary for report mismatch alerts."""
+    if not isinstance(state, dict):
+        return "unknown"
+
+    if check_type == "tunnel":
+        if not state.get("total_dead") and not state.get("total_unstable"):
+            return "all tunnels stable"
+        peer_parts = []
+        for peer in state.get("peers", []):
+            bits = []
+            if peer.get("dead"):
+                bits.append(f"{peer['dead']} dead")
+            if peer.get("unstable"):
+                bits.append(f"{peer['unstable']} unstable")
+            if bits:
+                peer_parts.append(f"{peer['peer_type']}: {', '.join(bits)}")
+        return "; ".join(peer_parts) if peer_parts else (
+            f"{state.get('total_dead', 0)} dead, {state.get('total_unstable', 0)} unstable"
+        )
+
+    if check_type == "route":
+        return f"{state.get('total_routes', 0)} routes"
+
+    if check_type == "path":
+        return (
+            f"{state.get('total_peer_count', 0)} peers, "
+            f"{state.get('total_paths', 0)} paths"
+        )
+
+    if check_type == "stale_pi":
+        count = state.get("count", 0)
+        return "no stale PI flows" if count == 0 else f"{count} stale PI flows"
+
+    if check_type == "stale_td":
+        count = state.get("count", 0)
+        return "no stale TD flows" if count == 0 else f"{count} stale TD flows"
+
+    if check_type == "health":
+        parts = []
+        cpu_state = state.get("cpu_state")
+        if cpu_state == "critical":
+            parts.append("CPU 300s avg critical")
+        elif cpu_state == "warning":
+            parts.append("CPU 300s avg high")
+        if state.get("mem_warn"):
+            parts.append("memory usage high")
+        if state.get("handoff_drops"):
+            parts.append("handoff drops present")
+        return ", ".join(parts) if parts else "healthy"
+
+    if check_type == "dpdk_leak":
+        count = state.get("leak_count", 0)
+        return "no DPDK leaks" if count == 0 else f"{count} DPDK mbuf leaks"
+
+    if check_type == "ha_panic":
+        count = state.get("count", 0)
+        return "no HA panic events" if count == 0 else f"{count} HA panic events"
+
+    return json.dumps(state, sort_keys=True)
+
+
 # Max chart data points per device embedded in reports. Beyond this, samples are
 # downsampled evenly so the HTML file stays a manageable size.
 MAX_CHART_SAMPLES = 500
@@ -1480,29 +1621,15 @@ def _build_report_data(session_id):
             s.pop("core_files_json", None)
             s.pop("ha_core_files_json", None)
 
-    # Gather check alerts that occurred during the recording window
+    # Gather report check mismatches by comparing start vs end state in the window
     with get_db() as conn:
         device_ids = [d["id"] for d in result_devices]
         check_alerts_data = []
         if device_ids:
             ph = ",".join("?" * len(device_ids))
             raw_check_rows = [dict(r) for r in conn.execute(f"""
-                SELECT dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail, dc.ts,
-                       (
-                           SELECT MIN(dc3.ts)
-                           FROM device_checks dc3
-                           WHERE dc3.device_id = dc.device_id
-                             AND dc3.check_type = dc.check_type
-                             AND dc3.alert_level != 'ok'
-                             AND dc3.ts > COALESCE((
-                                 SELECT MAX(dc4.ts)
-                                 FROM device_checks dc4
-                                 WHERE dc4.device_id = dc.device_id
-                                   AND dc4.check_type = dc.check_type
-                                   AND dc4.alert_level = 'ok'
-                                   AND dc4.ts < dc.ts
-                             ), '')
-                       ) AS streak_first_seen,
+                SELECT dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail,
+                       dc.result_json, dc.ts,
                        d.device_type, d.ip, d.vm_name,
                        h.name AS hypervisor_name
                 FROM device_checks dc
@@ -1510,41 +1637,62 @@ def _build_report_data(session_id):
                 JOIN hypervisors h ON d.hypervisor_id = h.id
                 WHERE dc.device_id IN ({ph})
                   AND dc.ts >= ? AND dc.ts <= ?
-                  AND dc.alert_level != 'ok'
                 ORDER BY
-                  CASE dc.alert_level WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-                  dc.ts DESC
+                  dc.device_id, dc.check_type, dc.ts ASC
             """, (*device_ids, start, stop)).fetchall()]
 
             grouped_checks = {}
             for row in raw_check_rows:
-                streak_first_seen = row.get("streak_first_seen") or row["ts"]
-                if streak_first_seen < start:
-                    continue
-                key = (
-                    row["device_id"], row["check_type"], row["alert_level"],
-                    row["alert_detail"], streak_first_seen,
-                )
+                key = (row["device_id"], row["check_type"])
                 grp = grouped_checks.setdefault(key, {
                     "device_id": row["device_id"],
                     "check_type": row["check_type"],
-                    "alert_level": row["alert_level"],
-                    "alert_detail": row["alert_detail"],
-                    "first_seen": streak_first_seen,
-                    "last_seen": row["ts"],
-                    "occurrences": 0,
                     "device_type": row["device_type"],
                     "ip": row["ip"],
                     "vm_name": row["vm_name"],
                     "hypervisor_name": row["hypervisor_name"],
+                    "start_row": row,
+                    "end_row": row,
                 })
-                grp["occurrences"] += 1
-                if row["ts"] > grp["last_seen"]:
-                    grp["last_seen"] = row["ts"]
+                grp["end_row"] = row
 
             severity_rank = {"critical": 0, "warning": 1}
+            for grp in grouped_checks.values():
+                start_row = grp["start_row"]
+                end_row = grp["end_row"]
+                if start_row["ts"] == end_row["ts"]:
+                    continue
+                try:
+                    start_result = json.loads(start_row["result_json"])
+                    end_result = json.loads(end_row["result_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                start_state = _report_check_state(grp["check_type"], start_result)
+                end_state = _report_check_state(grp["check_type"], end_result)
+                if start_state is None or end_state is None or start_state == end_state:
+                    continue
+                end_level = end_row["alert_level"]
+                mismatch_level = end_level if end_level in ("warning", "critical") else "warning"
+                start_summary = _report_check_state_summary(grp["check_type"], start_state)
+                end_summary = _report_check_state_summary(grp["check_type"], end_state)
+                check_alerts_data.append({
+                    "device_id": grp["device_id"],
+                    "check_type": grp["check_type"],
+                    "alert_level": mismatch_level,
+                    "alert_detail": f"Start: {start_summary}. End: {end_summary}.",
+                    "first_seen": start_row["ts"],
+                    "last_seen": end_row["ts"],
+                    "ts": end_row["ts"],
+                    "start_level": start_row["alert_level"],
+                    "end_level": end_row["alert_level"],
+                    "device_type": grp["device_type"],
+                    "ip": grp["ip"],
+                    "vm_name": grp["vm_name"],
+                    "hypervisor_name": grp["hypervisor_name"],
+                })
+
             check_rows = sorted(
-                grouped_checks.values(),
+                check_alerts_data,
                 key=lambda r: (
                     severity_rank.get(r["alert_level"], 2),
                     -_iso_to_epoch_seconds(r["last_seen"]),
@@ -1553,10 +1701,7 @@ def _build_report_data(session_id):
                     r.get("alert_detail") or "",
                 ),
             )
-
-            for cr in check_rows:
-                cr["ts"] = cr["last_seen"]
-                check_alerts_data.append(cr)
+            check_alerts_data = check_rows
 
         # Build per-device check summary and trend data
         # Query full (non-deduplicated) check history for trend charts

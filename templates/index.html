@@ -23,7 +23,15 @@
     .alert-item { background:#1c1c1c; border-radius:6px; padding:.45rem .8rem; margin-bottom:.35rem; }
 
     /* Table */
-    .tbl-wrap { background:#161b22; border:1px solid #30363d; border-radius:10px; overflow:hidden; }
+    .tbl-wrap { background:#161b22; border:1px solid #30363d; border-radius:10px; overflow:hidden; scroll-margin-top:88px; }
+    .report-device-jump { color:#c9d1d9; text-decoration:none; border-bottom:1px dashed rgba(88,166,255,.45); }
+    .report-device-jump:hover { color:#58a6ff; border-bottom-color:#58a6ff; }
+    .tbl-wrap:target { border-color:#58a6ff !important; box-shadow:0 0 0 2px rgba(88,166,255,.2); }
+    .scroll-top-btn {
+      position: fixed; right: 24px; bottom: 24px; z-index: 1040;
+      display: none; border-radius: 999px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
     .table { margin:0; font-size:.8rem; }
     .table thead th { background:#1c2128; border-color:#30363d; color:#8b949e;
                       font-size:.7rem; text-transform:uppercase; letter-spacing:.4px;
@@ -371,6 +379,11 @@
   </div>
 </div>
 
+<button id="scrollTopBtn" class="btn btn-primary scroll-top-btn"
+        onclick="window.scrollTo({top:0, behavior:'smooth'})" title="Scroll to top">
+  <i class="bi bi-arrow-up"></i>
+</button>
+
 <div class="topo-label" id="topoLabel"></div>
 
 <div class="container-fluid px-4" id="mainContent">
@@ -570,15 +583,19 @@ let activeDeviceId  = null;
 let memChart        = null;
 let activeCorePopover = null;
 let activeCoreElement = null;
+let currentView     = "chennai";
 const bsModal = new bootstrap.Modal(document.getElementById("deviceModal"));
 
 // Recording + Reports state
 let isRecording    = false;   // true when recTopoSelect's topology is recording
 let activeReportId = null;
+let activeReportIsLive = false;
 const reportCharts = {};
 let _activeReportCheckAlerts = [];
 let _activeReportCheckSummary = {};
 let _activeReportFilter = "";
+let _activeReportCheckTitle = "Check Alerts During Recording";
+let _suppressUrlSync = false;
 
 // ── Topology switching ────────────────────────────────────────────────────────
 const SC_TOPO_IDS = ["sc_tb1","sc_tb2","sc_tb3","sc_tb4","sc_tb5"];
@@ -594,11 +611,53 @@ const TOPO_LABELS = {
 
 let _statusTimer = null;
 
-function switchMainTab(which) {
+function _setFilterButtons() {
+  ["fAll","fEdge","fGW"].forEach(id => document.getElementById(id).classList.remove("active"));
+  document.getElementById(currentFilter === "" ? "fAll" : currentFilter === "edge" ? "fEdge" : "fGW")
+    .classList.add("active");
+}
+
+function _buildDeepLinkUrl() {
+  const params = new URLSearchParams();
+  params.set("view", currentView);
+
+  if (["chennai", "sc", "standard"].includes(currentView) && currentFilter) {
+    params.set("device_type", currentFilter);
+  }
+  if (currentView === "sc") {
+    params.set("topology", currentTopology);
+  }
+  if (currentView === "standard" && currentBastionId != null) {
+    params.set("bastion", String(currentBastionId));
+  }
+  if (currentView === "reports") {
+    const topoFilter = document.getElementById("reportTopoFilter")?.value || "";
+    if (topoFilter) params.set("reports_topology", topoFilter);
+    if (activeReportId != null) {
+      params.set("report", String(activeReportId));
+      if (activeReportIsLive) params.set("live", "1");
+    }
+    if (_activeReportFilter) params.set("report_check", _activeReportFilter);
+  }
+
+  const query = params.toString();
+  const hash = (currentView === "reports" && activeReportId != null &&
+    window.location.hash.startsWith("#report-device-")) ? window.location.hash : "";
+  return `${window.location.pathname}${query ? `?${query}` : ""}${hash}`;
+}
+
+function syncDeepLink() {
+  if (_suppressUrlSync) return;
+  history.replaceState(null, "", _buildDeepLinkUrl());
+}
+
+async function switchMainTab(which, options={}) {
+  const { skipUrlUpdate = false } = options;
   const isSC       = which === "sc";
   const isStandard = which === "standard";
   const isReports  = which === "reports";
   const isStatus   = which === "status";
+  currentView = which;
 
   // Stop live-report auto-refresh timer when leaving the reports tab
   if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
@@ -619,15 +678,20 @@ function switchMainTab(which) {
   document.getElementById("mainContent").style.display        = (isReports || isStatus) ? "none"  : "block";
   document.getElementById("topoLabel").style.display          = (isReports || isStatus) ? "none"  : "block";
   document.getElementById("topoPollingBar").style.display     = (isReports || isStatus || isStandard) ? "none" : "block";
+  updateScrollTopButton();
 
   if (isStatus) {
     loadStatus();
     _statusTimer = setInterval(loadStatus, 3000);
+    activeReportId = null;
+    activeReportIsLive = false;
+    if (!skipUrlUpdate) syncDeepLink();
     return;
   }
 
   if (isReports) {
-    loadReports();
+    await loadReports({skipUrlUpdate: true});
+    if (!skipUrlUpdate) syncDeepLink();
     return;
   }
 
@@ -652,14 +716,19 @@ function switchMainTab(which) {
     }
   }
   document.getElementById("topoLabel").textContent = TOPO_LABELS[currentTopology] || "";
+  activeReportId = null;
+  activeReportIsLive = false;
   refreshAll();
+  if (!skipUrlUpdate) syncDeepLink();
 }
 
-function switchScTab(tid) {
+function switchScTab(tid, options={}) {
+  const { skipUrlUpdate = false } = options;
   currentTopology = tid;
   _updateScPills();
   document.getElementById("topoLabel").textContent = TOPO_LABELS[tid] || "";
   refreshAll();
+  if (!skipUrlUpdate) syncDeepLink();
 }
 
 function _updateScPills() {
@@ -1555,11 +1624,12 @@ async function loadDeviceChecks(deviceId, hours) {
 }
 
 // ── Filter ────────────────────────────────────────────────────────────────────
-function setFilter(f) {
+function setFilter(f, options={}) {
+  const { skipLoad = false, skipUrlUpdate = false } = options;
   currentFilter = f;
-  ["fAll","fEdge","fGW"].forEach(id => document.getElementById(id).classList.remove("active"));
-  document.getElementById(f===""?"fAll":f==="edge"?"fEdge":"fGW").classList.add("active");
-  loadDevices();
+  _setFilterButtons();
+  if (!skipLoad) loadDevices();
+  if (!skipUrlUpdate) syncDeepLink();
 }
 
 // ── Stat pill helper ──────────────────────────────────────────────────────────
@@ -2080,7 +2150,8 @@ async function loadBastionHosts() {
   }).join("");
 }
 
-function switchBastionTab(hvId) {
+function switchBastionTab(hvId, options={}) {
+  const { skipUrlUpdate = false } = options;
   currentBastionId = hvId;
   document.getElementById("stdPillAll").classList.toggle("active", hvId === null);
   document.querySelectorAll(".std-bastion-pill").forEach(btn => {
@@ -2091,6 +2162,7 @@ function switchBastionTab(hvId) {
   document.getElementById("topoLabel").textContent =
     "Standard Testbeds" + (hvId !== null ? ` — ${label}` : "");
   refreshAll();
+  if (!skipUrlUpdate) syncDeepLink();
 }
 
 function toggleBastionAddForm() {
@@ -2159,13 +2231,15 @@ setInterval(() => {
   });
 }, 1000);
 
-async function loadReports() {
-  closeReportDetail();
+async function loadReports(options={}) {
+  const { skipUrlUpdate = false } = options;
+  closeReportDetail({skipUrlUpdate: true});
   await loadActiveRecordings();
   const val = document.getElementById("reportTopoFilter").value;
   const url = val ? `/api/reports?topology=${encodeURIComponent(val)}` : "/api/reports";
   const reports = await fetch(url).then(r => r.json());
   renderReportsList(reports);
+  if (!skipUrlUpdate) syncDeepLink();
 }
 
 async function loadActiveRecordings() {
@@ -2312,6 +2386,13 @@ function setReportCheckFilter(checkType) {
   const next = checkType || "";
   _activeReportFilter = _activeReportFilter === next ? "" : next;
   renderReportCheckAlertBanner();
+  syncDeepLink();
+}
+
+function updateScrollTopButton() {
+  const btn = document.getElementById("scrollTopBtn");
+  if (!btn) return;
+  btn.style.display = window.scrollY > 260 ? "inline-flex" : "none";
 }
 
 function renderReportCheckAlertBanner() {
@@ -2358,17 +2439,17 @@ function renderReportCheckAlertBanner() {
       ? '<i class="bi bi-cpu text-primary me-1"></i>'
       : '<i class="bi bi-diagram-3 text-success me-1"></i>';
     const name = a.vm_name || a.ip;
-    const occ = (a.occurrences || 1) > 1
-      ? `<span class="badge bg-secondary" style="font-size:.58rem" title="Seen ${a.occurrences} times between ${fmtTime(a.first_seen)} and ${fmtTime(a.last_seen)}">\u00d7${a.occurrences}</span>`
-      : '';
+    const nameHtml = `<a href="#report-device-${a.device_id}" class="report-device-jump fw-bold">${name}</a>`;
+    const timeLabel = a.first_seen && a.last_seen
+      ? `${fmtTime(a.first_seen)} \u2192 ${fmtTime(a.last_seen)}`
+      : fmtTime(a.last_seen || a.ts);
     return `<div style="font-size:.75rem;padding:3px 0">
       <span class="badge ${badge}" style="font-size:.6rem">${a.alert_level.toUpperCase()}</span>
-      ${typeIcon}<strong>${name}</strong>
+      ${typeIcon}${nameHtml}
       <code class="text-muted" style="font-size:.7rem">${a.ip}</code>
       <span class="badge bg-secondary" style="font-size:.6rem">${CHECK_LABELS[a.check_type] || a.check_type}</span>
       <span class="text-muted" style="font-size:.7rem">${a.alert_detail || ''}</span>
-      ${occ}
-      <span class="text-muted" style="font-size:.65rem;margin-left:4px">${fmtTime(a.last_seen || a.ts)}</span>
+      <span class="text-muted" style="font-size:.65rem;margin-left:4px">${timeLabel}</span>
     </div>`;
   }
 
@@ -2396,7 +2477,7 @@ function renderReportCheckAlertBanner() {
   host.innerHTML = `
   <div style="background:#1c1c1c;border:1px solid #30363d;border-radius:8px;padding:.8rem 1rem;margin-bottom:1rem">
     <div class="fw-bold mb-1" style="color:#d29922">
-      <i class="bi bi-shield-exclamation me-2"></i>Check Alerts During Recording
+      <i class="bi bi-shield-exclamation me-2"></i>${_activeReportCheckTitle}
       <span class="badge bg-secondary ms-2" style="font-size:.65rem">${checkAlerts.length} total</span>
     </div>
     <div class="d-flex flex-wrap gap-2 mb-2">${filterChips}</div>
@@ -2404,25 +2485,29 @@ function renderReportCheckAlertBanner() {
   </div>`;
 }
 
-async function openLiveReportDetail(reportId) {
+async function openLiveReportDetail(reportId, options={}) {
   // Open live view — same as openReportDetail but uses /live endpoint + auto-refreshes
-  await _openReportDetailImpl(reportId, true);
+  await _openReportDetailImpl(reportId, true, options);
 }
 
-async function openReportDetail(reportId) {
-  await _openReportDetailImpl(reportId, false);
+async function openReportDetail(reportId, options={}) {
+  await _openReportDetailImpl(reportId, false, options);
 }
 
-async function _openReportDetailImpl(reportId, preferLive) {
+async function _openReportDetailImpl(reportId, preferLive, options={}) {
+  const { skipUrlUpdate = false } = options;
   // Cancel any previous live refresh timer
   if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
 
   activeReportId = reportId;
+  activeReportIsLive = preferLive;
   document.getElementById("reportsList").style.display = "none";
   document.getElementById("reportDetail").style.display = "block";
   document.getElementById("reportDetailContent").innerHTML =
     '<div class="text-muted text-center py-5">' +
     '<span class="spinner-border spinner-border-sm me-2"></span>Loading…</div>';
+  if (!skipUrlUpdate) syncDeepLink();
+  updateScrollTopButton();
 
   const endpoint = preferLive ? `/api/reports/${reportId}/live` : `/api/reports/${reportId}/data`;
   const data = await fetch(endpoint).then(r => r.json());
@@ -2489,8 +2574,11 @@ function _applyReportDetailData(data) {
             return `<div><code>${f.name}</code>${dt ? ` <span class="text-muted">(${dt})</span>` : ''}</div>`;
           }).join('') + `</div>`;
       }
+      const nameHtml = a.device_id
+        ? `<a href="#report-device-${a.device_id}" class="report-device-jump fw-bold">${a.device_name}</a>`
+        : `<strong>${a.device_name}</strong>`;
       return `<div style="margin-bottom:4px"><i class="bi bi-bug-fill text-danger me-2"></i>` +
-        `<strong>${a.device_name}</strong> (${a.ip}) — ` +
+        `${nameHtml} (${a.ip}) — ` +
         `${a.core_count} core dump${a.core_count > 1 ? "s" : ""} detected` +
         (a.first_seen ? ` at ${fmtTime(a.first_seen)}` : "") +
         `${fileList}</div>`;
@@ -2509,6 +2597,9 @@ function _applyReportDetailData(data) {
   if (data.check_alerts && data.check_alerts.length > 0) {
     _activeReportCheckAlerts = data.check_alerts;
     _activeReportCheckSummary = data.check_alert_summary || {};
+    _activeReportCheckTitle = data.is_live
+      ? "Check Drift Since Recording Start"
+      : "Start vs End Check Mismatches";
     if (_activeReportFilter && !_activeReportCheckSummary[_activeReportFilter]) {
       _activeReportFilter = "";
     }
@@ -2517,6 +2608,9 @@ function _applyReportDetailData(data) {
     _activeReportCheckAlerts = [];
     _activeReportCheckSummary = {};
     _activeReportFilter = "";
+    _activeReportCheckTitle = data.is_live
+      ? "Check Drift Since Recording Start"
+      : "Start vs End Check Mismatches";
   }
 
   el.innerHTML = alertBanner + checkAlertBanner + (data.devices.length === 0
@@ -2530,6 +2624,7 @@ function _applyReportDetailData(data) {
     renderReportDetail(data, tmp);
   }
   renderReportCheckAlertBanner();
+  updateScrollTopButton();
 }
 
 function _statCard(label, val, color) {
@@ -2583,7 +2678,7 @@ function renderReportDetail(data, container) {
       return `<span class="badge ${cls}" style="font-size:.6rem" title="${ca.alert_detail || ''}">${lbl}</span>`;
     }).join(' ');
     return `
-    <div class="tbl-wrap mb-4">
+    <div class="tbl-wrap mb-4" id="report-device-${dev.id}">
       <div class="p-3 pb-2">
         <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
           <h6 class="mb-0">${typeIcon}${name}${coreBadge}</h6>
@@ -2730,13 +2825,68 @@ function buildReportChart(dev) {
   reportCharts[dev.id] = chart;
 }
 
-function closeReportDetail() {
+function closeReportDetail(options={}) {
+  const { skipUrlUpdate = false } = options;
   if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
   Object.values(reportCharts).forEach(c => c.destroy());
   Object.keys(reportCharts).forEach(k => delete reportCharts[k]);
   document.getElementById("reportDetail").style.display = "none";
   document.getElementById("reportsList").style.display = "block";
   activeReportId = null;
+  activeReportIsLive = false;
+  if (window.location.hash.startsWith("#report-device-")) {
+    history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  }
+  if (!skipUrlUpdate) syncDeepLink();
+  updateScrollTopButton();
+}
+
+async function applyDeepLinkFromLocation() {
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get("view") || (params.get("report") ? "reports" : "chennai");
+  const topology = params.get("topology");
+  const bastion = Number.parseInt(params.get("bastion") || "", 10);
+  const reportId = Number.parseInt(params.get("report") || "", 10);
+  const deviceType = ["edge", "gateway"].includes(params.get("device_type")) ? params.get("device_type") : "";
+  const reportsTopology = params.get("reports_topology") || "";
+  const reportCheck = params.get("report_check") || "";
+  const isLiveReport = params.get("live") === "1";
+
+  _suppressUrlSync = true;
+  setFilter(deviceType, {skipLoad: true, skipUrlUpdate: true});
+
+  if (view === "reports") {
+    const filter = document.getElementById("reportTopoFilter");
+    if (filter && reportsTopology && filter.querySelector(`option[value="${reportsTopology}"]`)) {
+      filter.value = reportsTopology;
+    }
+    await switchMainTab("reports", {skipUrlUpdate: true});
+    if (Number.isInteger(reportId) && reportId > 0) {
+      if (isLiveReport) await openLiveReportDetail(reportId, {skipUrlUpdate: true});
+      else await openReportDetail(reportId, {skipUrlUpdate: true});
+      if (reportCheck) {
+        _activeReportFilter = reportCheck;
+        renderReportCheckAlertBanner();
+      }
+    }
+  } else if (view === "status") {
+    await switchMainTab("status", {skipUrlUpdate: true});
+  } else if (view === "standard") {
+    currentTopology = "standard_testbeds";
+    await switchMainTab("standard", {skipUrlUpdate: true});
+    if (Number.isInteger(bastion)) {
+      switchBastionTab(bastion, {skipUrlUpdate: true});
+    }
+  } else if (view === "sc") {
+    if (SC_TOPO_IDS.includes(topology)) currentTopology = topology;
+    await switchMainTab("sc", {skipUrlUpdate: true});
+  } else {
+    currentTopology = "chennai";
+    await switchMainTab("chennai", {skipUrlUpdate: true});
+  }
+
+  _suppressUrlSync = false;
+  syncDeepLink();
 }
 
 // ── Auto-refresh ──────────────────────────────────────────────────────────────
@@ -2787,11 +2937,17 @@ async function refreshAll() {
     loadActiveRecordings();
   }
 }
+async function initializeApp() {
+  await loadRecordingOptions();
+  checkPollStatus();
+  await applyDeepLinkFromLocation();
+  updateScrollTopButton();
+}
+
 // Initial load
-loadRecordingOptions();
-checkPollStatus();
-refreshAll();
+initializeApp();
 setInterval(refreshAll, POLL_INTERVAL);
+window.addEventListener("scroll", updateScrollTopButton, { passive: true });
 </script>
 </body>
 </html>
