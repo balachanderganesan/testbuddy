@@ -1272,6 +1272,44 @@ def get_device_status(device_id):
     }
 
 
+def _memory_alert_first_seen(conn, device_id, pid, current_alert):
+    """Return the start time of the current memory-alert streak for a PID."""
+    if current_alert not in ("warning", "critical") or pid is None:
+        return None
+
+    rows = [dict(r) for r in conn.execute("""
+        SELECT ts, mem_total_kb, mem_free_kb
+        FROM memory_samples
+        WHERE device_id=? AND pid=?
+        ORDER BY ts ASC
+    """, (device_id, pid)).fetchall()]
+    if not rows:
+        return None
+
+    streak_start = None
+    for idx, row in enumerate(rows):
+        total = row["mem_total_kb"] or 1
+        free = row["mem_free_kb"] or 0
+        free_pct = free / total * 100
+        window = rows[max(0, idx - TREND_SAMPLES + 1): idx + 1]
+        slope = _slope_kb_per_hour([r["ts"] for r in window], [r["mem_free_kb"] for r in window])
+
+        if free_pct < CRIT_FREE_PCT or slope < CRIT_SLOPE_KB_H:
+            alert = "critical"
+        elif free_pct < WARN_FREE_PCT or slope < WARN_SLOPE_KB_H:
+            alert = "warning"
+        else:
+            alert = "ok"
+
+        if alert == current_alert:
+            if streak_start is None:
+                streak_start = row["ts"]
+        else:
+            streak_start = None
+
+    return streak_start
+
+
 # Max chart data points per device embedded in reports. Beyond this, samples are
 # downsampled evenly so the HTML file stays a manageable size.
 MAX_CHART_SAMPLES = 500
@@ -1944,6 +1982,10 @@ def api_alerts():
     for dev in devices:
         st = get_device_status(dev["id"])
         if st["alert"] in ("warning", "critical"):
+            first_seen = None
+            cur = st.get("current") or {}
+            with get_db() as conn:
+                first_seen = _memory_alert_first_seen(conn, dev["id"], cur.get("pid"), st["alert"])
             alerts.append({
                 "device_id":   dev["id"],
                 "device_type": dev["device_type"],
@@ -1952,6 +1994,7 @@ def api_alerts():
                 "hypervisor":  dev["hypervisor_name"],
                 "alert":       st["alert"],
                 "alert_source": "memory",
+                "first_seen":  first_seen,
                 "slope_kb_h":  st["slope_kb_h"],
                 "current":     st["current"],
                 "ha":          st["ha"],
@@ -1961,6 +2004,21 @@ def api_alerts():
     with get_db() as conn:
         check_alerts = [dict(r) for r in conn.execute("""
             SELECT dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail, dc.ts,
+                   (
+                       SELECT MIN(dc3.ts)
+                       FROM device_checks dc3
+                       WHERE dc3.device_id = dc.device_id
+                         AND dc3.check_type = dc.check_type
+                         AND dc3.alert_level != 'ok'
+                         AND dc3.ts > COALESCE((
+                             SELECT MAX(dc4.ts)
+                             FROM device_checks dc4
+                             WHERE dc4.device_id = dc.device_id
+                               AND dc4.check_type = dc.check_type
+                               AND dc4.alert_level = 'ok'
+                               AND dc4.ts < dc.ts
+                         ), '')
+                   ) AS first_seen,
                    d.device_type, d.ip, d.vm_name, h.name AS hypervisor_name
             FROM device_checks dc
             JOIN devices d ON dc.device_id = d.id
@@ -1984,6 +2042,7 @@ def api_alerts():
             "alert":        ca["alert_level"],
             "alert_source": ca["check_type"],
             "alert_detail": ca["alert_detail"],
+            "first_seen":   ca["first_seen"],
             "ts":           ca["ts"],
             "slope_kb_h":   None,
             "current":      None,
@@ -2009,6 +2068,21 @@ def api_checks():
         rows = [dict(r) for r in conn.execute(f"""
             SELECT dc.id, dc.device_id, dc.ts, dc.check_type,
                    dc.alert_level, dc.alert_detail,
+                   (
+                       SELECT MIN(dc3.ts)
+                       FROM device_checks dc3
+                       WHERE dc3.device_id = dc.device_id
+                         AND dc3.check_type = dc.check_type
+                         AND dc3.alert_level != 'ok'
+                         AND dc3.ts > COALESCE((
+                             SELECT MAX(dc4.ts)
+                             FROM device_checks dc4
+                             WHERE dc4.device_id = dc.device_id
+                               AND dc4.check_type = dc.check_type
+                               AND dc4.alert_level = 'ok'
+                               AND dc4.ts < dc.ts
+                         ), '')
+                   ) AS first_seen,
                    d.device_type, d.ip, d.vm_name,
                    h.name AS hypervisor_name
             FROM device_checks dc

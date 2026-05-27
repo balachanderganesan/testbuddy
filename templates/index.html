@@ -129,6 +129,9 @@
     .active-rec-card { background:#161b22; border:1px solid #f85149; border-radius:8px;
                        padding:.75rem 1rem; margin-bottom:.5rem; cursor:pointer; }
     .active-rec-card:hover { border-color:#ff7b72; }
+    .report-filter-chip { border:1px solid #30363d; background:#21262d; color:#c9d1d9;
+                          border-radius:999px; font-size:.68rem; padding:.18rem .55rem; }
+    .report-filter-chip.active { background:#1f6feb; border-color:#1f6feb; color:#fff; }
   </style>
 </head>
 <body>
@@ -573,6 +576,9 @@ const bsModal = new bootstrap.Modal(document.getElementById("deviceModal"));
 let isRecording    = false;   // true when recTopoSelect's topology is recording
 let activeReportId = null;
 const reportCharts = {};
+let _activeReportCheckAlerts = [];
+let _activeReportCheckSummary = {};
+let _activeReportFilter = "";
 
 // ── Topology switching ────────────────────────────────────────────────────────
 const SC_TOPO_IDS = ["sc_tb1","sc_tb2","sc_tb3","sc_tb4","sc_tb5"];
@@ -1096,6 +1102,13 @@ const CHECK_LABELS = {
 
 let _checkAlertsData = [];  // cached for dismiss operations
 
+function renderAlertSince(c) {
+  const ts = c?.first_seen || c?.ts;
+  return ts
+    ? `<span class="text-muted" style="font-size:.68rem">Since ${fmtTime(ts)}</span>`
+    : '';
+}
+
 function _renderCheckAlertItem(c) {
   const typeIcon = c.device_type === 'edge'
     ? '<i class="bi bi-cpu text-primary me-1"></i>'
@@ -1109,6 +1122,7 @@ function _renderCheckAlertItem(c) {
     ${typeIcon}<strong>${name}</strong>
     <code class="text-muted" style="font-size:.72rem">${c.ip}</code>
     <span class="text-muted" style="font-size:.72rem">${c.alert_detail || ''}</span>
+    ${renderAlertSince(c)}
     <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto"
             onclick="event.stopPropagation(); openModal(${c.device_id})"
             title="View device details">
@@ -1138,6 +1152,7 @@ async function loadLogsAnalysis() {
         <code class="text-muted" style="font-size:.72rem">${c.ip}</code>
         <span class="badge bg-danger" style="font-size:.65rem">HA ACTIVE/ACTIVE</span>
         <span class="text-muted" style="font-size:.72rem">${c.alert_detail || ''}</span>
+        ${renderAlertSince(c)}
         <button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-auto"
                 onclick="event.stopPropagation(); openModal(${c.device_id})"
                 title="View device details">
@@ -1820,8 +1835,11 @@ function _getActiveTopoIds() {
 
 function updateTopoPollingBar() {
   const bar = document.getElementById("topoPollingBar");
-  // Only show for chennai and sc tabs (not standard_testbeds, reports, status)
-  if (currentTopology !== "chennai" && !currentTopology.startsWith("sc_tb")) {
+  const reportsVisible = document.getElementById("reportsPanel").style.display !== "none";
+  const statusVisible = document.getElementById("statusPanel").style.display !== "none";
+  // Only show for live topology views, never in reports/status/standard-testbeds.
+  if (reportsVisible || statusVisible || currentTopology === "standard_testbeds" ||
+      (currentTopology !== "chennai" && !currentTopology.startsWith("sc_tb"))) {
     bar.style.display = "none";
     return;
   }
@@ -2290,6 +2308,102 @@ function fmtTime(iso) {
   } catch { return iso.slice(0,16).replace("T"," "); }
 }
 
+function setReportCheckFilter(checkType) {
+  const next = checkType || "";
+  _activeReportFilter = _activeReportFilter === next ? "" : next;
+  renderReportCheckAlertBanner();
+}
+
+function renderReportCheckAlertBanner() {
+  const host = document.getElementById("reportCheckBannerContainer");
+  if (!host) return;
+
+  const checkAlerts = _activeReportCheckAlerts || [];
+  const summary = _activeReportCheckSummary || {};
+  if (!checkAlerts.length) {
+    host.innerHTML = "";
+    return;
+  }
+
+  const availableTypes = Object.keys(summary);
+  if (_activeReportFilter && !availableTypes.includes(_activeReportFilter)) {
+    _activeReportFilter = "";
+  }
+
+  const filteredAlerts = _activeReportFilter
+    ? checkAlerts.filter(a => a.check_type === _activeReportFilter)
+    : checkAlerts;
+
+  const chip = (label, value, meta = "") => {
+    const active = (_activeReportFilter || "") === (value || "");
+    return `<button class="report-filter-chip ${active ? 'active' : ''}" onclick="setReportCheckFilter('${value}')">` +
+      `${label}${meta}</button>`;
+  };
+
+  const filterChips = [
+    chip("All", "", ` <span style="opacity:.8">${checkAlerts.length}</span>`),
+    ...availableTypes.map(ct => {
+      const s = summary[ct] || {};
+      const label = CHECK_LABELS[ct] || ct;
+      let meta = ` <span style="opacity:.8">${s.total || 0}</span>`;
+      if (s.critical) meta += ` <span style="color:#f85149">(${s.critical} crit)</span>`;
+      if (s.warning) meta += ` <span style="color:#d29922">(${s.warning} warn)</span>`;
+      return chip(label, ct, meta);
+    }),
+  ].join('');
+
+  function _reportCheckRow(a) {
+    const badge = a.alert_level === 'critical' ? 'badge-critical' : 'badge-warning';
+    const typeIcon = a.device_type === 'edge'
+      ? '<i class="bi bi-cpu text-primary me-1"></i>'
+      : '<i class="bi bi-diagram-3 text-success me-1"></i>';
+    const name = a.vm_name || a.ip;
+    const occ = (a.occurrences || 1) > 1
+      ? `<span class="badge bg-secondary" style="font-size:.58rem" title="Seen ${a.occurrences} times between ${fmtTime(a.first_seen)} and ${fmtTime(a.last_seen)}">\u00d7${a.occurrences}</span>`
+      : '';
+    return `<div style="font-size:.75rem;padding:3px 0">
+      <span class="badge ${badge}" style="font-size:.6rem">${a.alert_level.toUpperCase()}</span>
+      ${typeIcon}<strong>${name}</strong>
+      <code class="text-muted" style="font-size:.7rem">${a.ip}</code>
+      <span class="badge bg-secondary" style="font-size:.6rem">${CHECK_LABELS[a.check_type] || a.check_type}</span>
+      <span class="text-muted" style="font-size:.7rem">${a.alert_detail || ''}</span>
+      ${occ}
+      <span class="text-muted" style="font-size:.65rem;margin-left:4px">${fmtTime(a.last_seen || a.ts)}</span>
+    </div>`;
+  }
+
+  const SHOW_LIMIT = 15;
+  const visible = filteredAlerts.slice(0, SHOW_LIMIT);
+  const overflow = filteredAlerts.slice(SHOW_LIMIT);
+  const alertRows = visible.map(_reportCheckRow).join('');
+
+  let overflowHtml = '';
+  if (overflow.length) {
+    const overflowRows = overflow.map(_reportCheckRow).join('');
+    overflowHtml = `<div id="reportCheckOverflow" style="display:none">${overflowRows}</div>
+      <button class="btn btn-sm btn-link py-0 px-1" style="font-size:.72rem"
+              onclick="const el=document.getElementById('reportCheckOverflow');
+                if(el.style.display==='none'){el.style.display='block';this.textContent='Show less'}
+                else{el.style.display='none';this.textContent='Show ${overflow.length} more...'}">
+        Show ${overflow.length} more...
+      </button>`;
+  }
+
+  const emptyHtml = filteredAlerts.length
+    ? ""
+    : '<div class="text-muted" style="font-size:.75rem">No alerts match the selected filter.</div>';
+
+  host.innerHTML = `
+  <div style="background:#1c1c1c;border:1px solid #30363d;border-radius:8px;padding:.8rem 1rem;margin-bottom:1rem">
+    <div class="fw-bold mb-1" style="color:#d29922">
+      <i class="bi bi-shield-exclamation me-2"></i>Check Alerts During Recording
+      <span class="badge bg-secondary ms-2" style="font-size:.65rem">${checkAlerts.length} total</span>
+    </div>
+    <div class="d-flex flex-wrap gap-2 mb-2">${filterChips}</div>
+    ${emptyHtml || `${alertRows}${overflowHtml}`}
+  </div>`;
+}
+
 async function openLiveReportDetail(reportId) {
   // Open live view — same as openReportDetail but uses /live endpoint + auto-refreshes
   await _openReportDetailImpl(reportId, true);
@@ -2393,62 +2507,16 @@ function _applyReportDetailData(data) {
   // Check alerts banner
   let checkAlertBanner = "";
   if (data.check_alerts && data.check_alerts.length > 0) {
-    const summary = data.check_alert_summary || {};
-    const catHtml = Object.entries(summary).map(([ct, s]) => {
-      const label = CHECK_LABELS[ct] || ct;
-      return `<span class="badge bg-secondary me-1" style="font-size:.65rem">${label}: ${s.total}`
-        + (s.critical ? ` <span style="color:#f85149">(${s.critical} crit)</span>` : '')
-        + (s.warning ? ` <span style="color:#d29922">(${s.warning} warn)</span>` : '')
-        + `</span>`;
-    }).join('');
-
-    function _reportCheckRow(a) {
-      const badge = a.alert_level === 'critical' ? 'badge-critical' : 'badge-warning';
-      const typeIcon = a.device_type === 'edge'
-        ? '<i class="bi bi-cpu text-primary me-1"></i>'
-        : '<i class="bi bi-diagram-3 text-success me-1"></i>';
-      const name = a.vm_name || a.ip;
-      const occ = (a.occurrences || 1) > 1
-        ? `<span class="badge bg-secondary" style="font-size:.58rem" title="Seen ${a.occurrences} times between ${fmtTime(a.first_seen)} and ${fmtTime(a.last_seen)}">\u00d7${a.occurrences}</span>`
-        : '';
-      return `<div style="font-size:.75rem;padding:3px 0">
-        <span class="badge ${badge}" style="font-size:.6rem">${a.alert_level.toUpperCase()}</span>
-        ${typeIcon}<strong>${name}</strong>
-        <code class="text-muted" style="font-size:.7rem">${a.ip}</code>
-        <span class="badge bg-secondary" style="font-size:.6rem">${CHECK_LABELS[a.check_type] || a.check_type}</span>
-        <span class="text-muted" style="font-size:.7rem">${a.alert_detail || ''}</span>
-        ${occ}
-        <span class="text-muted" style="font-size:.65rem;margin-left:4px">${fmtTime(a.last_seen || a.ts)}</span>
-      </div>`;
+    _activeReportCheckAlerts = data.check_alerts;
+    _activeReportCheckSummary = data.check_alert_summary || {};
+    if (_activeReportFilter && !_activeReportCheckSummary[_activeReportFilter]) {
+      _activeReportFilter = "";
     }
-
-    const SHOW_LIMIT = 15;
-    const visible = data.check_alerts.slice(0, SHOW_LIMIT);
-    const overflow = data.check_alerts.slice(SHOW_LIMIT);
-    const alertRows = visible.map(_reportCheckRow).join('');
-
-    let overflowHtml = '';
-    if (overflow.length) {
-      const overflowRows = overflow.map(_reportCheckRow).join('');
-      overflowHtml = `<div id="reportCheckOverflow" style="display:none">${overflowRows}</div>
-        <button class="btn btn-sm btn-link py-0 px-1" style="font-size:.72rem"
-                onclick="const el=document.getElementById('reportCheckOverflow');
-                  if(el.style.display==='none'){el.style.display='block';this.textContent='Show less'}
-                  else{el.style.display='none';this.textContent='Show ${overflow.length} more...'}">
-          Show ${overflow.length} more...
-        </button>`;
-    }
-
-    checkAlertBanner = `
-    <div style="background:#1c1c1c;border:1px solid #30363d;border-radius:8px;padding:.8rem 1rem;margin-bottom:1rem">
-      <div class="fw-bold mb-1" style="color:#d29922">
-        <i class="bi bi-shield-exclamation me-2"></i>Check Alerts During Recording
-        <span class="badge bg-secondary ms-2" style="font-size:.65rem">${data.check_alerts.length} total</span>
-      </div>
-      <div class="mb-2">${catHtml}</div>
-      ${alertRows}
-      ${overflowHtml}
-    </div>`;
+    checkAlertBanner = `<div id="reportCheckBannerContainer"></div>`;
+  } else {
+    _activeReportCheckAlerts = [];
+    _activeReportCheckSummary = {};
+    _activeReportFilter = "";
   }
 
   el.innerHTML = alertBanner + checkAlertBanner + (data.devices.length === 0
@@ -2461,6 +2529,7 @@ function _applyReportDetailData(data) {
     document.getElementById("reportDetailContent").appendChild(tmp);
     renderReportDetail(data, tmp);
   }
+  renderReportCheckAlertBanner();
 }
 
 function _statCard(label, val, color) {
