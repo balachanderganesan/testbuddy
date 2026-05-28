@@ -19,6 +19,7 @@ A real-time testbed verification dashboard for VeloCloud SD-WAN infrastructure. 
 - **HA Peer Monitoring** — Probes standby edge at `169.254.2.2` for memory, CPU, core dumps
 - **Core Dump Tracking** — Detects and lists core dump files with timestamps
 - **Recording & Reports** — Record polling sessions at custom intervals, generate downloadable HTML reports with trend charts
+- **Shared Recording Support** — Multiple users can record different testbeds or bastions at the same time, with one active recording per target
 - **Pause/Resume Polling** — Toggle auto-polling on/off when the testbed is under heavy load
 - **Multi-Topology Support** — Chennai, SC testbeds (TB1–TB5), and dynamic Standard Testbeds with bastion host management
 - **Alert Management** — Dismiss individual, selected, or all check alerts; auto-purge after 5 days
@@ -136,10 +137,16 @@ Useful overrides:
 |---|---|---|
 | `/api/recording/start` | POST | Start recording session |
 | `/api/recording/stop` | POST | Stop recording session |
-| `/api/recording/status` | GET | Current recording state |
+| `/api/recording/status` | GET | Current recording state for one target |
+| `/api/recording/active` | GET | All active recordings across targets |
 | `/api/reports` | GET | List completed reports |
 | `/api/reports/<id>/data` | GET | Report data with check trends |
 | `/api/reports/<id>/download` | GET | Downloadable HTML report |
+
+Recording rules:
+- Different testbeds and bastions can be recorded concurrently.
+- The same testbed or bastion can have only one active recording at a time.
+- Recordings are anonymous and tied to the target, so any user can stop an active target recording.
 
 ### Bastion Hosts (Standard Testbeds)
 | Endpoint | Method | Description |

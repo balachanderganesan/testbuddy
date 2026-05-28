@@ -587,7 +587,8 @@ let currentView     = "chennai";
 const bsModal = new bootstrap.Modal(document.getElementById("deviceModal"));
 
 // Recording + Reports state
-let isRecording    = false;   // true when recTopoSelect's topology is recording
+let activeRecordingTargets = {};   // target value -> active recording session
+let currentRecordingSession = null;
 let activeReportId = null;
 let activeReportIsLive = false;
 const reportCharts = {};
@@ -1972,6 +1973,7 @@ async function changeTopoInterval() {
 
 async function loadRecordingOptions() {
   const sel = document.getElementById("recTopoSelect");
+  const prev = sel.value;
   const [options, activeRecs] = await Promise.all([
     fetch("/api/recording/options").then(r => r.json()).catch(() => []),
     fetch("/api/recording/active").then(r => r.json()).catch(() => []),
@@ -1987,29 +1989,35 @@ async function loadRecordingOptions() {
     og.label = grp;
     opts.forEach(o => {
       const opt = document.createElement("option");
+      const baseLabel = o.label + (o.device_count != null ? ` (${o.device_count} dev)` : "");
       opt.value = o.value;
-      opt.textContent = o.label + (o.device_count != null ? ` (${o.device_count} dev)` : "");
+      opt.dataset.baseLabel = baseLabel;
+      opt.textContent = baseLabel;
       og.appendChild(opt);
     });
     sel.appendChild(og);
   });
-  // If a recording is already active (e.g. after page refresh), select its topology
-  // so the Stop button is correctly shown
-  if (activeRecs.length) {
-    const first = activeRecs[0];
-    const topoVal = first.hypervisor_id ? `bastion_${first.hypervisor_id}` : first.topology_id;
-    if (sel.querySelector(`option[value="${topoVal}"]`)) {
-      sel.value = topoVal;
+
+  const preferredTargets = [
+    prev,
+    currentBastionId != null ? `bastion_${currentBastionId}` : null,
+    currentTopology.startsWith("sc_") || currentTopology === "chennai" ? currentTopology : null,
+  ].filter(Boolean);
+  for (const target of preferredTargets) {
+    if (sel.querySelector(`option[value="${target}"]`)) {
+      sel.value = target;
+      break;
     }
-  } else {
-    // Default to current topology tab if possible
-    const cur = currentTopology.startsWith("sc_") || currentTopology === "chennai" ? currentTopology : null;
-    if (cur && sel.querySelector(`option[value="${cur}"]`)) sel.value = cur;
   }
-  onRecTopoChange();
+  if (!sel.value && sel.options.length) {
+    const firstOption = sel.querySelector("option");
+    if (firstOption) sel.value = firstOption.value;
+  }
 
   // Populate the reports filter dropdown with the same topology-level options
   _populateReportFilterOptions(options);
+  _setActiveRecordings(activeRecs);
+  onRecTopoChange();
 }
 
 function _populateReportFilterOptions(options) {
@@ -2035,28 +2043,59 @@ function onRecTopoChange() {
   document.getElementById("recIntervalSelect").style.display = val ? "block" : "none";
 }
 
-async function checkRecordingStatus() {
-  const tid = document.getElementById("recTopoSelect").value;
-  if (!tid) return;
+function _recordingTargetValue(session) {
+  return session.hypervisor_id != null ? `bastion_${session.hypervisor_id}` : session.topology_id;
+}
+
+function _syncRecordingOptionLabels() {
+  const sel = document.getElementById("recTopoSelect");
+  Array.from(sel.options).forEach(opt => {
+    const baseLabel = opt.dataset.baseLabel || opt.textContent;
+    opt.textContent = activeRecordingTargets[opt.value] ? `${baseLabel} [REC]` : baseLabel;
+  });
+}
+
+function _setActiveRecordings(activeRecs) {
+  activeRecordingTargets = {};
+  activeRecs.forEach(r => {
+    activeRecordingTargets[_recordingTargetValue(r)] = r;
+  });
+  _syncRecordingOptionLabels();
+  renderActiveRecordings(activeRecs);
+}
+
+async function refreshRecordingState() {
   try {
-    const res = await fetch(`/api/recording/status?topology=${encodeURIComponent(tid)}`).then(r => r.json());
-    isRecording = res.recording;
-    // Sync interval select to current recording's interval
-    if (isRecording && res.session?.poll_interval_sec) {
-      const sel = document.getElementById("recIntervalSelect");
-      sel.value = String(res.session.poll_interval_sec);
-      sel.disabled = true;   // can't change interval of active recording
-    } else {
-      document.getElementById("recIntervalSelect").disabled = false;
-    }
-    _updateRecBtn();
-  } catch (e) { /* ignore */ }
+    const res = await fetch("/api/recording/active");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const activeRecs = await res.json();
+    _setActiveRecordings(activeRecs);
+    checkRecordingStatus();
+    return activeRecs;
+  } catch (err) {
+    console.error("refreshRecordingState:", err);
+    checkRecordingStatus();
+    return Object.values(activeRecordingTargets);
+  }
+}
+
+function checkRecordingStatus() {
+  const tid = document.getElementById("recTopoSelect").value;
+  const sel = document.getElementById("recIntervalSelect");
+  currentRecordingSession = tid ? (activeRecordingTargets[tid] || null) : null;
+  if (currentRecordingSession?.poll_interval_sec) {
+    sel.value = String(currentRecordingSession.poll_interval_sec);
+    sel.disabled = true;
+  } else {
+    sel.disabled = false;
+  }
+  _updateRecBtn();
 }
 
 function _updateRecBtn() {
   const btn = document.getElementById("recBtn");
   const dot = document.getElementById("recIndicator");
-  if (isRecording) {
+  if (currentRecordingSession) {
     btn.innerHTML = '<i class="bi bi-stop-circle me-1"></i>Stop';
     btn.classList.remove("btn-outline-danger");
     btn.classList.add("btn-danger");
@@ -2074,40 +2113,48 @@ async function toggleRecording() {
   const tid      = document.getElementById("recTopoSelect").value;
   const tname    = document.getElementById("recTopoSelect").selectedOptions[0]?.text || tid;
   const interval = parseInt(document.getElementById("recIntervalSelect").value) || 300;
+  const active   = tid ? activeRecordingTargets[tid] || null : null;
   if (!tid) return;
 
-  if (isRecording) {
-    const r = await fetch("/api/recording/stop", {
+  if (active) {
+    const res = await fetch("/api/recording/stop", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({topology: tid}),
-    }).then(r => r.json());
-    isRecording = false;
-    document.getElementById("recIntervalSelect").disabled = false;
-    _updateRecBtn();
+    });
+    const r = await res.json();
+    if (!res.ok) {
+      toast(r.error || "Failed to stop recording", "error");
+      await refreshRecordingState();
+      return;
+    }
+    await refreshRecordingState();
     toast(`Recording stopped — ${r.sample_count || 0} samples, ${r.device_count || 0} devices`);
     // Refresh reports if the tab is open
     if (document.getElementById("reportsPanel").style.display !== "none") loadReports();
   } else {
     const label = prompt(`Label for this recording (optional):\n${tname}`, "") ?? null;
     if (label === null) return; // cancelled
-    const r = await fetch("/api/recording/start", {
+    const res = await fetch("/api/recording/start", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({topology: tid, label: label.trim(), poll_interval_sec: interval}),
-    }).then(r => r.json());
+    });
+    const r = await res.json();
     if (r.error === "already_recording") {
       toast("Already recording for this testbed");
-      isRecording = true;
-      document.getElementById("recIntervalSelect").disabled = true;
-      _updateRecBtn();
+      await refreshRecordingState();
       return;
     }
-    isRecording = true;
-    document.getElementById("recIntervalSelect").disabled = true;
-    _updateRecBtn();
+    if (!res.ok) {
+      toast(r.error || "Failed to start recording", "error");
+      await refreshRecordingState();
+      return;
+    }
+    await refreshRecordingState();
     const intLabel = interval < 60 ? `${interval}s` : `${interval/60}min`;
-    toast(`Recording started for ${tname.split("(")[0].trim()} (every ${intLabel})`);
+    const cleanName = tname.replace(/\s*\[REC\]$/, "").split("(")[0].trim();
+    toast(`Recording started for ${cleanName} (every ${intLabel})`);
   }
 }
 
@@ -2243,7 +2290,11 @@ async function loadReports(options={}) {
 }
 
 async function loadActiveRecordings() {
-  const active = await fetch("/api/recording/active").then(r => r.json()).catch(() => []);
+  const active = await refreshRecordingState();
+  return active;
+}
+
+function renderActiveRecordings(active) {
   const sec  = document.getElementById("activeRecordingsSection");
   const list = document.getElementById("activeRecordingsList");
   // Keep _activeRecStartTimes in sync — clear entries not in latest response
@@ -2946,6 +2997,7 @@ async function initializeApp() {
 
 // Initial load
 initializeApp();
+setInterval(refreshRecordingState, 15000);
 setInterval(refreshAll, POLL_INTERVAL);
 window.addEventListener("scroll", updateScrollTopButton, { passive: true });
 </script>

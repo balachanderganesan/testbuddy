@@ -204,6 +204,16 @@ def init_db():
         _add_col_if_missing(conn, "recording_sessions", "poll_interval_sec INTEGER DEFAULT 300")
         _add_col_if_missing(conn, "recording_sessions", "last_polled_at TEXT")
         _add_col_if_missing(conn, "recording_sessions", "hypervisor_id INTEGER")
+        _normalize_active_recording_sessions(conn)
+        conn.executescript("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_rs_active_topology
+                ON recording_sessions(topology_id)
+                WHERE status='recording' AND hypervisor_id IS NULL;
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_rs_active_hypervisor
+                ON recording_sessions(hypervisor_id)
+                WHERE status='recording' AND hypervisor_id IS NOT NULL;
+        """)
         _add_col_if_missing(conn, "devices", "vm_name TEXT")
         _add_col_if_missing(conn, "devices", "core_files TEXT")
         _add_col_if_missing(conn, "devices", "ha_core_files TEXT")
@@ -232,6 +242,74 @@ def _add_col_if_missing(conn, table, col_def):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
     except sqlite3.OperationalError:
         pass  # column already exists
+
+
+def _normalize_active_recording_sessions(conn):
+    """Collapse duplicate active recordings so unique indexes can be created safely."""
+    duplicate_groups = conn.execute("""
+        SELECT topology_id, hypervisor_id, COUNT(*) AS cnt
+        FROM recording_sessions
+        WHERE status='recording'
+        GROUP BY topology_id, hypervisor_id
+        HAVING cnt > 1
+    """).fetchall()
+    if not duplicate_groups:
+        return
+
+    now = datetime.utcnow().isoformat()
+    for group in duplicate_groups:
+        topology_id = group["topology_id"]
+        hypervisor_id = group["hypervisor_id"]
+        if hypervisor_id is None:
+            rows = conn.execute("""
+                SELECT id, sample_count
+                FROM recording_sessions
+                WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'
+                ORDER BY started_at DESC, id DESC
+            """, (topology_id,)).fetchall()
+            target_desc = topology_id
+        else:
+            rows = conn.execute("""
+                SELECT id, sample_count
+                FROM recording_sessions
+                WHERE topology_id=? AND hypervisor_id=? AND status='recording'
+                ORDER BY started_at DESC, id DESC
+            """, (topology_id, hypervisor_id)).fetchall()
+            target_desc = f"{topology_id}/hypervisor {hypervisor_id}"
+
+        keep_id = rows[0]["id"]
+        stale_ids = [row["id"] for row in rows[1:]]
+        if not stale_ids:
+            continue
+
+        log.warning(
+            "Found %d active recording sessions for %s; keeping session %s and closing %s",
+            len(rows),
+            target_desc,
+            keep_id,
+            stale_ids,
+        )
+        for row in rows[1:]:
+            conn.execute(
+                """
+                UPDATE recording_sessions
+                SET status=?, stopped_at=COALESCE(stopped_at, ?)
+                WHERE id=?
+                """,
+                ("complete" if (row["sample_count"] or 0) > 0 else "empty", now, row["id"]),
+            )
+
+
+def _get_active_recording(conn, topology_id, hypervisor_id):
+    if hypervisor_id is not None:
+        return conn.execute(
+            "SELECT * FROM recording_sessions WHERE hypervisor_id=? AND status='recording'",
+            (hypervisor_id,),
+        ).fetchone()
+    return conn.execute(
+        "SELECT * FROM recording_sessions WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'",
+        (topology_id,),
+    ).fetchone()
 
 
 @contextmanager
@@ -2669,26 +2747,24 @@ def api_recording_start():
 
     with get_db() as conn:
         # One active recording per (topology, hypervisor_id)
-        if hv_id:
-            existing = conn.execute(
-                "SELECT id FROM recording_sessions WHERE hypervisor_id=? AND status='recording'",
-                (hv_id,)
-            ).fetchone()
-        else:
-            existing = conn.execute(
-                "SELECT id FROM recording_sessions WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'",
-                (tid,)
-            ).fetchone()
+        existing = _get_active_recording(conn, tid, hv_id)
         if existing:
             return jsonify({"error": "already_recording", "session_id": existing["id"]}), 409
 
         now = datetime.utcnow().isoformat()
-        cur = conn.execute(
-            """INSERT INTO recording_sessions
-               (topology_id, hypervisor_id, label, started_at, status, poll_interval_sec, last_polled_at)
-               VALUES(?,?,?,?,?,?,?)""",
-            (tid, hv_id, label, now, "recording", poll_interval, None)
-        )
+        try:
+            cur = conn.execute(
+                """INSERT INTO recording_sessions
+                   (topology_id, hypervisor_id, label, started_at, status, poll_interval_sec, last_polled_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (tid, hv_id, label, now, "recording", poll_interval, None)
+            )
+        except sqlite3.IntegrityError:
+            existing = _get_active_recording(conn, tid, hv_id)
+            return jsonify({
+                "error": "already_recording",
+                "session_id": existing["id"] if existing else None,
+            }), 409
         session_id = cur.lastrowid
     session = {
         "id": session_id,
@@ -2730,16 +2806,7 @@ def api_recording_stop():
         tid = raw_topology
 
     with get_db() as conn:
-        if hv_id:
-            session = conn.execute(
-                "SELECT * FROM recording_sessions WHERE hypervisor_id=? AND status='recording'",
-                (hv_id,)
-            ).fetchone()
-        else:
-            session = conn.execute(
-                "SELECT * FROM recording_sessions WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'",
-                (tid,)
-            ).fetchone()
+        session = _get_active_recording(conn, tid, hv_id)
         if not session:
             return jsonify({"error": "no_active_recording"}), 404
 
@@ -2792,18 +2859,16 @@ def api_recording_status():
         except (IndexError, ValueError):
             return jsonify({"recording": False, "session": None})
     with get_db() as conn:
-        if hv_id:
-            row = conn.execute(
-                "SELECT id, started_at, label, poll_interval_sec FROM recording_sessions WHERE hypervisor_id=? AND status='recording'",
-                (hv_id,)
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT id, started_at, label, poll_interval_sec FROM recording_sessions WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'",
-                (raw,)
-            ).fetchone()
+        row = _get_active_recording(conn, raw, hv_id)
     if row:
-        return jsonify({"recording": True, "session": dict(row)})
+        session = dict(row)
+        session = {
+            "id": session["id"],
+            "started_at": session["started_at"],
+            "label": session["label"],
+            "poll_interval_sec": session["poll_interval_sec"],
+        }
+        return jsonify({"recording": True, "session": session})
     return jsonify({"recording": False, "session": None})
 
 
