@@ -204,6 +204,7 @@ def init_db():
         _add_col_if_missing(conn, "recording_sessions", "poll_interval_sec INTEGER DEFAULT 300")
         _add_col_if_missing(conn, "recording_sessions", "last_polled_at TEXT")
         _add_col_if_missing(conn, "recording_sessions", "hypervisor_id INTEGER")
+        _normalize_active_recording_sessions(conn)
         conn.executescript("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_rs_active_topology
                 ON recording_sessions(topology_id)
@@ -241,6 +242,62 @@ def _add_col_if_missing(conn, table, col_def):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
     except sqlite3.OperationalError:
         pass  # column already exists
+
+
+def _normalize_active_recording_sessions(conn):
+    """Collapse duplicate active recordings so unique indexes can be created safely."""
+    duplicate_groups = conn.execute("""
+        SELECT topology_id, hypervisor_id, COUNT(*) AS cnt
+        FROM recording_sessions
+        WHERE status='recording'
+        GROUP BY topology_id, hypervisor_id
+        HAVING cnt > 1
+    """).fetchall()
+    if not duplicate_groups:
+        return
+
+    now = datetime.utcnow().isoformat()
+    for group in duplicate_groups:
+        topology_id = group["topology_id"]
+        hypervisor_id = group["hypervisor_id"]
+        if hypervisor_id is None:
+            rows = conn.execute("""
+                SELECT id, sample_count
+                FROM recording_sessions
+                WHERE topology_id=? AND hypervisor_id IS NULL AND status='recording'
+                ORDER BY started_at DESC, id DESC
+            """, (topology_id,)).fetchall()
+            target_desc = topology_id
+        else:
+            rows = conn.execute("""
+                SELECT id, sample_count
+                FROM recording_sessions
+                WHERE topology_id=? AND hypervisor_id=? AND status='recording'
+                ORDER BY started_at DESC, id DESC
+            """, (topology_id, hypervisor_id)).fetchall()
+            target_desc = f"{topology_id}/hypervisor {hypervisor_id}"
+
+        keep_id = rows[0]["id"]
+        stale_ids = [row["id"] for row in rows[1:]]
+        if not stale_ids:
+            continue
+
+        log.warning(
+            "Found %d active recording sessions for %s; keeping session %s and closing %s",
+            len(rows),
+            target_desc,
+            keep_id,
+            stale_ids,
+        )
+        for row in rows[1:]:
+            conn.execute(
+                """
+                UPDATE recording_sessions
+                SET status=?, stopped_at=COALESCE(stopped_at, ?)
+                WHERE id=?
+                """,
+                ("complete" if (row["sample_count"] or 0) > 0 else "empty", now, row["id"]),
+            )
 
 
 def _get_active_recording(conn, topology_id, hypervisor_id):

@@ -2065,10 +2065,18 @@ function _setActiveRecordings(activeRecs) {
 }
 
 async function refreshRecordingState() {
-  const activeRecs = await fetch("/api/recording/active").then(r => r.json()).catch(() => []);
-  _setActiveRecordings(activeRecs);
-  checkRecordingStatus();
-  return activeRecs;
+  try {
+    const res = await fetch("/api/recording/active");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const activeRecs = await res.json();
+    _setActiveRecordings(activeRecs);
+    checkRecordingStatus();
+    return activeRecs;
+  } catch (err) {
+    console.error("refreshRecordingState:", err);
+    checkRecordingStatus();
+    return Object.values(activeRecordingTargets);
+  }
 }
 
 function checkRecordingStatus() {
