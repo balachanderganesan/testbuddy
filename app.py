@@ -312,6 +312,36 @@ def _get_active_recording(conn, topology_id, hypervisor_id):
     ).fetchone()
 
 
+def _get_last_polled_at(conn, topology_id, hypervisor_id=None):
+    where = ["h.topology_id=?"]
+    params = [topology_id]
+    if hypervisor_id is not None:
+        where.append("d.hypervisor_id=?")
+        params.append(hypervisor_id)
+    row = conn.execute(f"""
+        SELECT MAX(ms.ts) AS last_polled_at
+        FROM memory_samples ms
+        JOIN devices d ON ms.device_id = d.id
+        JOIN hypervisors h ON d.hypervisor_id = h.id
+        WHERE {" AND ".join(where)}
+    """, params).fetchone()
+    return row["last_polled_at"] if row else None
+
+
+def _get_topology_last_polled_map(conn):
+    last_polled = {tid: None for tid in TOPOLOGIES}
+    rows = conn.execute("""
+        SELECT h.topology_id, MAX(ms.ts) AS last_polled_at
+        FROM memory_samples ms
+        JOIN devices d ON ms.device_id = d.id
+        JOIN hypervisors h ON d.hypervisor_id = h.id
+        GROUP BY h.topology_id
+    """).fetchall()
+    for row in rows:
+        last_polled[row["topology_id"]] = row["last_polled_at"]
+    return last_polled
+
+
 @contextmanager
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -1980,6 +2010,7 @@ def api_summary():
     tid   = request.args.get("topology", "chennai")
     hv_id = request.args.get("hypervisor_id", type=int)
     with get_db() as conn:
+        last_polled_at = _get_last_polled_at(conn, tid, hv_id)
         if hv_id:
             hv_where  = "id=? AND topology_id=?"
             hv_args   = (hv_id, tid)
@@ -2016,6 +2047,7 @@ def api_summary():
         "edges":         {"total": e_total,   "reachable": e_up},
         "gateways":      {"total": g_total,   "reachable": g_up},
         "total_samples": samples,
+        "last_polled_at": last_polled_at,
         "server_time":   datetime.utcnow().isoformat() + "Z",
     })
 
@@ -2559,6 +2591,7 @@ def api_status():
     completed = _poll_status["completed"]
     waiting = max(0, total - completed) if _poll_status["state"] == "polling" else 0
     with get_db() as conn:
+        topo_last_polled = _get_topology_last_polled_map(conn)
         db_devices = conn.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
         db_samples = conn.execute("SELECT COUNT(*) FROM memory_samples").fetchone()[0]
         db_checks = conn.execute("SELECT COUNT(*) FROM device_checks").fetchone()[0]
@@ -2587,7 +2620,11 @@ def api_status():
         },
         "server_time": datetime.utcnow().isoformat() + "Z",
         "topologies": {
-            tid: {"enabled": cfg["enabled"], "poll_interval": cfg["poll_interval"]}
+            tid: {
+                "enabled": cfg["enabled"],
+                "poll_interval": cfg["poll_interval"],
+                "last_polled_at": topo_last_polled.get(tid),
+            }
             for tid, cfg in _topo_config.items()
         },
     })
@@ -2603,10 +2640,16 @@ def api_poll_now():
 
 @app.route("/api/polling/status")
 def api_polling_status():
+    with get_db() as conn:
+        topo_last_polled = _get_topology_last_polled_map(conn)
     return jsonify({
         "paused": _polling_paused,
         "topologies": {
-            tid: {"enabled": cfg["enabled"], "poll_interval": cfg["poll_interval"]}
+            tid: {
+                "enabled": cfg["enabled"],
+                "poll_interval": cfg["poll_interval"],
+                "last_polled_at": topo_last_polled.get(tid),
+            }
             for tid, cfg in _topo_config.items()
         },
     })

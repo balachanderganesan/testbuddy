@@ -150,6 +150,7 @@
     <span class="navbar-brand"><i class="bi bi-activity text-primary me-2"></i>Test Buddy</span>
     <div class="d-flex align-items-center gap-3 flex-wrap">
       <span id="lastUpdated">—</span>
+      <span id="lastPolled">—</span>
       <span id="pollStatusIndicator"><span class="live-dot"></span><span class="text-success" style="font-size:.72rem">LIVE</span></span>
       <button class="btn btn-sm btn-outline-secondary" onclick="triggerRediscover()">
         <i class="bi bi-arrow-repeat me-1"></i>Rediscover
@@ -277,6 +278,7 @@
       <option value="1800">30 min</option>
       <option value="3600">1 hour</option>
     </select>
+    <span style="font-size:.78rem;color:#8b949e" id="topoPollingLastPolled">Last poll: —</span>
   </div>
 </div>
 
@@ -909,6 +911,9 @@ async function loadSummary() {
   document.getElementById("sumGW").textContent      = d.gateways.total;
   document.getElementById("sumGWSub").textContent   = d.gateways.reachable+" reachable";
   document.getElementById("lastUpdated").textContent = "Updated "+fmtTime(d.server_time);
+  document.getElementById("lastPolled").textContent = "Last poll "+fmtTime(d.last_polled_at);
+  const topoPollTs = document.getElementById("topoPollingLastPolled");
+  if (topoPollTs) topoPollTs.textContent = "Last poll: " + fmtTime(d.last_polled_at);
 }
 
 // ── Core dumps banner ─────────────────────────────────────────────────────────
@@ -1935,6 +1940,8 @@ function updateTopoPollingBar() {
   if (sel.value !== String(cfg.poll_interval)) {
     sel.value = "900";
   }
+  document.getElementById("topoPollingLastPolled").textContent =
+    "Last poll: " + fmtTime(cfg.last_polled_at);
 }
 
 async function toggleTopoPolling() {
@@ -2980,7 +2987,7 @@ async function loadStatus() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis()]);
+  await Promise.all([loadSummary(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis(), checkPollStatus()]);
   checkRecordingStatus();
   updateTopoPollingBar();
   // Refresh active-recordings section if Reports tab is visible
