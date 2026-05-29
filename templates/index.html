@@ -100,7 +100,7 @@
 
     /* Scrollable table container */
     .tbl-scroll { overflow-x:auto; }
-    #lastUpdated { font-size:.72rem; color:#8b949e; }
+    #lastPolled { font-size:.72rem; color:#8b949e; }
 
     /* Topology tabs */
     .topo-bar { background:#0d1117; border-bottom:1px solid #30363d; padding:.35rem 0 0; margin-bottom:0; }
@@ -149,7 +149,6 @@
   <div class="container-fluid">
     <span class="navbar-brand"><i class="bi bi-activity text-primary me-2"></i>Test Buddy</span>
     <div class="d-flex align-items-center gap-3 flex-wrap">
-      <span id="lastUpdated">—</span>
       <span id="lastPolled">—</span>
       <span id="pollStatusIndicator"><span class="live-dot"></span><span class="text-success" style="font-size:.72rem">LIVE</span></span>
       <button class="btn btn-sm btn-outline-secondary" onclick="triggerRediscover()">
@@ -910,8 +909,7 @@ async function loadSummary() {
   document.getElementById("sumEdgeSub").textContent = d.edges.reachable+" reachable";
   document.getElementById("sumGW").textContent      = d.gateways.total;
   document.getElementById("sumGWSub").textContent   = d.gateways.reachable+" reachable";
-  document.getElementById("lastUpdated").textContent = "Updated "+fmtTime(d.server_time);
-  document.getElementById("lastPolled").textContent = "Last poll "+fmtTime(d.last_polled_at);
+  document.getElementById("lastPolled").textContent = "Last device poll "+fmtTime(d.last_polled_at);
   const topoPollTs = document.getElementById("topoPollingLastPolled");
   if (topoPollTs) topoPollTs.textContent = "Last poll: " + fmtTime(d.last_polled_at);
 }
