@@ -1573,6 +1573,122 @@ def _report_check_state_summary(check_type, state):
 # downsampled evenly so the HTML file stays a manageable size.
 MAX_CHART_SAMPLES = 500
 
+
+def _downsample_chart_samples(samples):
+    if len(samples) <= MAX_CHART_SAMPLES:
+        return samples
+    step = max(1, len(samples) // MAX_CHART_SAMPLES)
+    chart_samples = samples[::step]
+    if chart_samples[-1] is not samples[-1]:
+        chart_samples.append(samples[-1])
+    return chart_samples
+
+
+def _build_device_export_data(device_id, hours):
+    """Build the standalone HTML export payload for a single device."""
+    hours = max(1, min(int(hours), 168))
+    window_end = datetime.utcnow().isoformat()
+    since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+
+    with get_db() as conn:
+        dev = conn.execute("""
+            SELECT d.*, h.name AS hypervisor_name, h.ip AS hypervisor_ip, h.topology_id
+            FROM devices d
+            JOIN hypervisors h ON d.hypervisor_id = h.id
+            WHERE d.id = ?
+        """, (device_id,)).fetchone()
+        if not dev:
+            return None
+        dev = dict(dev)
+
+        pid_row = conn.execute(
+            "SELECT pid FROM memory_samples WHERE device_id=? ORDER BY ts DESC LIMIT 1",
+            (device_id,),
+        ).fetchone()
+        current_pid = pid_row["pid"] if pid_row else None
+
+        samples = [dict(r) for r in conn.execute("""
+            SELECT ts, pid, mem_total_kb, mem_free_kb, mem_available_kb,
+                   cpu_pct, process_uptime_sec, core_count,
+                   ha_reachable, ha_pid, ha_mem_total_kb, ha_mem_free_kb,
+                   ha_mem_available_kb, ha_cpu_pct, ha_process_uptime_sec, ha_core_count
+            FROM memory_samples
+            WHERE device_id=? AND ts >= ?
+            ORDER BY ts ASC
+        """, (device_id, since)).fetchall()]
+
+        latest_checks = [dict(r) for r in conn.execute("""
+            SELECT dc.*
+            FROM device_checks dc
+            WHERE dc.device_id = ?
+              AND dc.ts = (
+                  SELECT MAX(dc2.ts) FROM device_checks dc2
+                  WHERE dc2.device_id = dc.device_id
+                    AND dc2.check_type = dc.check_type
+              )
+            ORDER BY dc.check_type
+        """, (device_id,)).fetchall()]
+
+        trend_rows = [dict(r) for r in conn.execute("""
+            SELECT ts, check_type, result_json, alert_level
+            FROM device_checks
+            WHERE device_id = ? AND ts >= ?
+            ORDER BY ts ASC
+        """, (device_id, since)).fetchall()]
+
+    for row in latest_checks:
+        try:
+            row["result"] = json.loads(row["result_json"])
+        except (json.JSONDecodeError, TypeError):
+            row["result"] = None
+        row.pop("result_json", None)
+
+    trends = {}
+    for row in trend_rows:
+        ct = row["check_type"]
+        extractor = _TREND_EXTRACTORS.get(ct)
+        if not extractor:
+            continue
+        try:
+            result = json.loads(row["result_json"])
+            metrics = extractor(result)
+        except Exception:
+            continue
+        metrics["ts"] = row["ts"]
+        metrics["alert_level"] = row["alert_level"]
+        trends.setdefault(ct, []).append(metrics)
+
+    topology_id = dev.get("topology_id")
+    topology_label = TOPOLOGIES.get(topology_id, {}).get("label", topology_id or "Unknown")
+    pid_sessions = sorted({s["pid"] for s in samples if s.get("pid") is not None})
+    memory_status = get_device_status(device_id)
+
+    try:
+        dev["core_files"] = json.loads(dev.get("core_files") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        dev["core_files"] = []
+    try:
+        dev["ha_core_files"] = json.loads(dev.get("ha_core_files") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        dev["ha_core_files"] = []
+
+    return {
+        "device": dev,
+        "display_name": dev.get("vm_name") or dev["ip"],
+        "topology_label": topology_label,
+        "hours": hours,
+        "window_start": since,
+        "window_end": window_end,
+        "generated_at": datetime.utcnow().isoformat(),
+        "current_pid": current_pid,
+        "pid_sessions": pid_sessions,
+        "pid_session_count": len(pid_sessions),
+        "memory": memory_status,
+        "samples": _downsample_chart_samples(samples),
+        "checks": latest_checks,
+        "check_trends": trends,
+    }
+
 # ── Report data builder ───────────────────────────────────────────────────────
 
 def _build_report_data(session_id):
@@ -1650,14 +1766,7 @@ def _build_report_data(session_id):
             dev["_all_samples"] = samples
 
             # Downsample for chart rendering to cap HTML size; summary uses all samples
-            if len(samples) > MAX_CHART_SAMPLES:
-                step = max(1, len(samples) // MAX_CHART_SAMPLES)
-                chart_samples = samples[::step]
-                if chart_samples[-1] is not samples[-1]:
-                    chart_samples.append(samples[-1])
-                dev["samples"] = chart_samples
-            else:
-                dev["samples"] = samples
+            dev["samples"] = _downsample_chart_samples(samples)
             result_devices.append(dev)
 
     # Compute coredump alerts from full (non-downsampled) sample data
@@ -2148,6 +2257,29 @@ def api_device_history(device_id):
         "current_pid": current_pid,
         "samples":     [dict(s) for s in samples],
     })
+
+
+@app.route("/api/device/<int:device_id>/report/download")
+def api_device_report_download(device_id):
+    hours = request.args.get("hours", 6)
+    data = _build_device_export_data(device_id, hours)
+    if not data:
+        return jsonify({"error": "not found"}), 404
+
+    html = render_template(
+        "device_report.html",
+        report_data=data,
+        warn_free_pct=WARN_FREE_PCT,
+        crit_free_pct=CRIT_FREE_PCT,
+    )
+    base_name = _sanitize_download_name(
+        f"{data['display_name']}_{data['device']['device_type']}_{data['hours']}h_report"
+    )
+    return Response(
+        html,
+        mimetype="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{base_name}.html"'},
+    )
 
 
 @app.route("/api/device/<int:device_id>/core/download")

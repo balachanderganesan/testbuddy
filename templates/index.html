@@ -553,6 +553,9 @@
           <button class="btn btn-outline-secondary time-btn" onclick="loadHistory(24)">24h</button>
           <button class="btn btn-outline-secondary time-btn" onclick="loadHistory(72)">3d</button>
           <button class="btn btn-outline-secondary time-btn" onclick="loadHistory(168)">7d</button>
+          <a id="deviceReportDownloadBtn" href="#" class="btn btn-sm btn-outline-primary ms-2 disabled">
+            <i class="bi bi-download me-1"></i>Download HTML
+          </a>
           <span id="modalPidNote" class="ms-auto text-muted" style="font-size:.73rem"></span>
         </div>
 
@@ -581,6 +584,7 @@ let currentFilter   = "";
 let currentTopology = "chennai";
 let currentBastionId = null;   // null = show all bastion hosts; integer = filter to one
 let activeDeviceId  = null;
+let activeHistoryHours = 6;
 let memChart        = null;
 let activeCorePopover = null;
 let activeCoreElement = null;
@@ -1645,15 +1649,31 @@ function statCard(label, value, icon, color) {
   </div></div>`;
 }
 
+function _updateDeviceReportDownloadLink() {
+  const btn = document.getElementById("deviceReportDownloadBtn");
+  if (!btn) return;
+  if (!activeDeviceId) {
+    btn.href = "#";
+    btn.classList.add("disabled");
+    return;
+  }
+  btn.href = `/api/device/${activeDeviceId}/report/download?hours=${activeHistoryHours}`;
+  btn.classList.remove("disabled");
+}
+
 // ── Modal / chart ─────────────────────────────────────────────────────────────
 function openModal(deviceId) {
   activeDeviceId = deviceId;
+  activeHistoryHours = 6;
+  _updateDeviceReportDownloadLink();
   bsModal.show();
   loadHistory(6);
 }
 
 async function loadHistory(hours) {
   if (!activeDeviceId) return;
+  activeHistoryHours = hours;
+  _updateDeviceReportDownloadLink();
 
   document.querySelectorAll(".time-btn").forEach(b => {
     const labels = {"1":"1h","6":"6h","24":"24h","72":"3d","168":"7d"};
