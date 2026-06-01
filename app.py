@@ -405,13 +405,13 @@ def ssh_run(ssh, cmd, timeout=None):
 def _find_core_file_path(ssh, file_name):
     """Locate a core dump path by basename on a device."""
     safe_name = shlex.quote(file_name)
-    return ssh_run(
+    out = ssh_run(
         ssh,
         "find /velocloud/core /velocloud/kcore -maxdepth 2 -type f "
-        "\\( -name '*.tgz' -o -name '*.gz' \\) "
-        f"-name {safe_name} -print -quit 2>/dev/null",
+        f"-name {safe_name} -print 2>/dev/null",
         timeout=SSH_TIMEOUT,
     )
+    return (out.splitlines() or [""])[0].strip()
 
 
 def _ha_proxy_command(inner_cmd):
@@ -434,10 +434,15 @@ def _find_ha_core_file_path(ssh, file_name):
     safe_name = shlex.quote(file_name)
     inner_cmd = (
         "find /velocloud/core /velocloud/kcore -maxdepth 2 -type f "
-        "\\( -name '*.tgz' -o -name '*.gz' \\) "
-        f"-name {safe_name} -print -quit 2>/dev/null"
+        f"-name {safe_name} -print 2>/dev/null"
     )
-    return ssh_run(ssh, _ha_proxy_command(inner_cmd), timeout=HA_SSH_TIMEOUT + 5)
+    out = ssh_run(ssh, _ha_proxy_command(inner_cmd), timeout=HA_SSH_TIMEOUT + 5)
+    return (out.splitlines() or [""])[0].strip()
+
+
+def _parse_remote_size(raw):
+    value = (raw or "").strip()
+    return int(value) if value.isdigit() else None
 
 
 def _sanitize_download_name(name):
@@ -2170,6 +2175,10 @@ def api_device_core_download(device_id):
     files = json.loads(files_json or "[]")
     allowed_names = {f.get("name") for f in files if isinstance(f, dict)}
     if file_name not in allowed_names:
+        log.warning(
+            "Core download rejected for device %s file %s (ha=%s): not present in cached file list",
+            device_id, file_name, want_ha,
+        )
         return jsonify({"error": "core file not found for device"}), 404
 
     jump_ssh = None
@@ -2183,25 +2192,37 @@ def api_device_core_download(device_id):
         if want_ha:
             remote_path = _find_ha_core_file_path(jump_ssh, file_name)
             if not remote_path:
+                log.warning(
+                    "Core download path lookup failed for device %s file %s (ha=%s)",
+                    device_id, file_name, want_ha,
+                )
                 raise FileNotFoundError(file_name)
             size_raw = ssh_run(
                 jump_ssh,
-                _ha_proxy_command(f"wc -c < {shlex.quote(remote_path)}"),
+                _ha_proxy_command(f"stat -c %s {shlex.quote(remote_path)}"),
                 timeout=HA_SSH_TIMEOUT + 5,
             )
             _, stdout, _ = jump_ssh.exec_command(
                 _ha_proxy_command(f"cat {shlex.quote(remote_path)}"),
                 timeout=SSH_TIMEOUT + HA_SSH_TIMEOUT,
             )
-            remote_stat_size = int(size_raw.strip() or "0")
+            remote_stat_size = _parse_remote_size(size_raw)
         else:
             sftp_ssh = jump_ssh
             remote_path = _find_core_file_path(sftp_ssh, file_name)
             if not remote_path:
+                log.warning(
+                    "Core download path lookup failed for device %s file %s (ha=%s)",
+                    device_id, file_name, want_ha,
+                )
                 raise FileNotFoundError(file_name)
             sftp = sftp_ssh.open_sftp()
             remote_file = sftp.open(remote_path, "rb")
             remote_stat_size = sftp.stat(remote_path).st_size
+        log.info(
+            "Core download resolved for device %s file %s (ha=%s): path=%s size=%s",
+            device_id, file_name, want_ha, remote_path, remote_stat_size,
+        )
     except FileNotFoundError:
         if stdout:
             stdout.close()
@@ -2235,11 +2256,15 @@ def api_device_core_download(device_id):
     def generate():
         try:
             if want_ha:
-                while True:
-                    chunk = stdout.channel.recv(1024 * 1024)
+                remaining = remote_stat_size
+                while remaining is None or remaining > 0:
+                    chunk_size = 1024 * 1024 if remaining is None else min(1024 * 1024, remaining)
+                    chunk = stdout.channel.recv(chunk_size)
                     if not chunk:
                         break
                     yield chunk
+                    if remaining is not None:
+                        remaining -= len(chunk)
             else:
                 while True:
                     chunk = remote_file.read(1024 * 1024)
@@ -2270,9 +2295,10 @@ def api_device_core_download(device_id):
 
     headers = {
         "Content-Disposition": f'attachment; filename="{attachment_name}"',
-        "Content-Length": str(remote_stat_size),
         "Cache-Control": "no-store",
     }
+    if remote_stat_size is not None:
+        headers["Content-Length"] = str(remote_stat_size)
     return Response(stream_with_context(generate()), mimetype=mime_type, headers=headers)
 
 
