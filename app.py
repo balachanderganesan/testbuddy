@@ -20,10 +20,10 @@ import os
 import re
 import shlex
 import sqlite3
+import logging
 import threading
 import time
-import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from pathlib import Path
@@ -112,10 +112,31 @@ _poll_status = {
     "completed": 0,
     "started_at": None,
 }
+_active_poll_lock = threading.Lock()
+_active_poll_devices = set()
 
 app = Flask(__name__)
 
 # ── Database ──────────────────────────────────────────────────────────────────
+
+def _describe_db_files():
+    db_file = Path(DB_PATH)
+    details = []
+    for path in (db_file, Path(f"{DB_PATH}-wal"), Path(f"{DB_PATH}-shm")):
+        try:
+            st = path.stat()
+            details.append(f"{path.name}=present:{st.st_size}B")
+        except FileNotFoundError:
+            details.append(f"{path.name}=missing")
+        except OSError as exc:
+            details.append(f"{path.name}=error:{exc}")
+    try:
+        fs = os.statvfs(db_file.parent)
+        free_mb = (fs.f_bavail * fs.f_frsize) // (1024 * 1024)
+        details.append(f"dir_free_mb={free_mb}")
+    except OSError as exc:
+        details.append(f"dir_free_mb=error:{exc}")
+    return ", ".join(details)
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -344,17 +365,44 @@ def _get_topology_last_polled_map(conn):
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        log.error("SQLite connect failed for %s: %s (%s)", DB_PATH, exc, _describe_db_files())
+        raise
     try:
         yield conn
         conn.commit()
-    except Exception:
-        conn.rollback()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except sqlite3.Error as rollback_exc:
+            log.error(
+                "SQLite rollback failed for %s: %s (%s)",
+                DB_PATH,
+                rollback_exc,
+                _describe_db_files(),
+            )
+        if isinstance(exc, sqlite3.Error):
+            log.error("SQLite operation failed for %s: %s (%s)", DB_PATH, exc, _describe_db_files())
         raise
     finally:
         conn.close()
+
+
+@app.errorhandler(sqlite3.Error)
+def handle_sqlite_error(exc):
+    log.error(
+        "SQLite error on %s %s: %s (%s)",
+        request.method,
+        request.path,
+        exc,
+        _describe_db_files(),
+    )
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "database_unavailable"}), 503
+    return "Database unavailable", 503
 
 
 CHECKS_RETENTION_HOURS = 120  # 5 days for diagnostic check alerts
@@ -398,8 +446,41 @@ def ssh_connect(host, port, username, password):
 
 def ssh_run(ssh, cmd, timeout=None):
     t = timeout or SSH_TIMEOUT
-    _, stdout, _ = ssh.exec_command(cmd, timeout=t)
-    return stdout.read().decode("utf-8", errors="replace").strip()
+    _, stdout, stderr = ssh.exec_command(cmd, timeout=t)
+    channel = stdout.channel
+    chunks = []
+    err_chunks = []
+    deadline = time.monotonic() + t
+
+    while True:
+        made_progress = False
+
+        while channel.recv_ready():
+            chunks.append(channel.recv(4096))
+            made_progress = True
+
+        while channel.recv_stderr_ready():
+            err_chunks.append(channel.recv_stderr(4096))
+            made_progress = True
+
+        if channel.exit_status_ready():
+            while channel.recv_ready():
+                chunks.append(channel.recv(4096))
+            while channel.recv_stderr_ready():
+                err_chunks.append(channel.recv_stderr(4096))
+            break
+
+        if made_progress:
+            deadline = time.monotonic() + t
+            continue
+
+        if time.monotonic() >= deadline:
+            channel.close()
+            raise TimeoutError(f"SSH command timed out after {t}s")
+
+        time.sleep(0.1)
+
+    return b"".join(chunks).decode("utf-8", errors="replace").strip()
 
 
 def _find_core_file_path(ssh, file_name):
@@ -807,6 +888,7 @@ def _collect_ha_metrics(ssh):
 # ── Diagnostic checks ────────────────────────────────────────────────────────
 
 CHECKS_SSH_TIMEOUT = 120  # headroom for debug.py --timeout 60 commands
+POLL_DEVICE_TIMEOUT = CHECKS_SSH_TIMEOUT + SSH_TIMEOUT + HA_SSH_TIMEOUT + 15
 
 
 def _checks_cmd():
@@ -1246,6 +1328,25 @@ def poll_device(device):
             conn.execute("UPDATE devices SET reachable=0 WHERE id=?", (device["id"],))
 
 
+def _claim_poll_devices(devices):
+    claimed = []
+    skipped = []
+    with _active_poll_lock:
+        for dev in devices:
+            dev_id = dev["id"]
+            if dev_id in _active_poll_devices:
+                skipped.append(dev)
+                continue
+            _active_poll_devices.add(dev_id)
+            claimed.append(dev)
+    return claimed, skipped
+
+
+def _release_poll_device(device_id):
+    with _active_poll_lock:
+        _active_poll_devices.discard(device_id)
+
+
 def run_poll(topo_ids=None):
     global _op_name
     if not _op_lock.acquire(blocking=False):
@@ -1277,22 +1378,93 @@ def _run_poll(topo_ids=None):
         log.info("No devices in DB yet — waiting for discovery")
         return
 
+    devices, skipped = _claim_poll_devices(devices)
+    if skipped:
+        log.warning("Skipping %d device(s) still active from a previous poll", len(skipped))
+    if not devices:
+        log.warning("Poll skipped — all candidate devices are still active from a previous poll")
+        return
+
     _poll_status["state"] = "polling"
     _poll_status["total_devices"] = len(devices)
     _poll_status["completed"] = 0
     _poll_status["started_at"] = datetime.utcnow().isoformat()
 
-    def _tracked_poll(dev):
-        poll_device(dev)
-        _poll_status["completed"] += 1
-
     log.info(f"Polling {len(devices)} devices (max {POLL_WORKERS} concurrent)...")
-    with ThreadPoolExecutor(max_workers=POLL_WORKERS) as pool:
-        for d in devices:
-            pool.submit(_tracked_poll, d)
-    # pool.__exit__ calls shutdown(wait=True) — blocks until all tasks finish.
-    # poll_device handles its own DB writes, SSH timeouts, and errors.
-    _poll_status["state"] = "idle"
+    poll_starts = {}
+
+    def _tracked_poll(dev):
+        poll_starts[dev["id"]] = time.monotonic()
+        try:
+            poll_device(dev)
+        finally:
+            _release_poll_device(dev["id"])
+
+    pool = ThreadPoolExecutor(max_workers=POLL_WORKERS, thread_name_prefix="poll")
+    futures = {}
+    pending = set()
+    timed_out = []
+
+    try:
+        for dev in devices:
+            fut = pool.submit(_tracked_poll, dev)
+            futures[fut] = {"device": dev, "submitted_at": time.monotonic()}
+            pending.add(fut)
+
+        while pending:
+            try:
+                for fut in as_completed(tuple(pending), timeout=1):
+                    pending.discard(fut)
+                    futures[fut]["completed"] = True
+                    fut.result()
+                    _poll_status["completed"] += 1
+            except FutureTimeoutError:
+                pass
+
+            now = time.monotonic()
+            for fut in list(pending):
+                meta = futures[fut]
+                dev = meta["device"]
+                started_at = poll_starts.get(dev["id"])
+
+                if started_at is None:
+                    if now - meta["submitted_at"] <= POLL_DEVICE_TIMEOUT:
+                        continue
+                    if fut.cancel():
+                        pending.discard(fut)
+                        futures[fut]["completed"] = True
+                        _release_poll_device(dev["id"])
+                        _poll_status["completed"] += 1
+                        timed_out.append(dev)
+                        log.error(
+                            "Poll start timeout after %.1fs for %s:%s (%s)",
+                            now - meta["submitted_at"], dev["hypervisor_ip"], dev["console_port"], dev["ip"],
+                        )
+                    continue
+
+                if now - started_at <= POLL_DEVICE_TIMEOUT:
+                    continue
+
+                pending.discard(fut)
+                futures[fut]["completed"] = True
+                _poll_status["completed"] += 1
+                timed_out.append(dev)
+                log.error(
+                    "Poll timeout after %.1fs for %s:%s (%s)",
+                    now - started_at, dev["hypervisor_ip"], dev["console_port"], dev["ip"],
+                )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+        for fut, meta in futures.items():
+            if meta.get("completed"):
+                continue
+            dev = meta["device"]
+            if fut.cancel():
+                _release_poll_device(dev["id"])
+        _poll_status["state"] = "idle"
+
+    if timed_out:
+        log.warning("Poll completed with %d timed out device(s)", len(timed_out))
     log.info("Poll complete")
 
 
