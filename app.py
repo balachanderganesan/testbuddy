@@ -363,6 +363,73 @@ def _get_topology_last_polled_map(conn):
     return last_polled
 
 
+BASTION_TARGET_PREFIX = "bastion_"
+_poll_cfg_lock = threading.Lock()
+
+
+def _new_poll_config():
+    return {"enabled": False, "poll_interval": POLL_INTERVAL}
+
+
+def _list_standard_bastion_ids(conn):
+    return [
+        row["id"] for row in conn.execute("""
+            SELECT id
+            FROM hypervisors
+            WHERE topology_id = 'standard_testbeds'
+            ORDER BY id
+        """).fetchall()
+    ]
+
+
+def _ensure_bastion_poll_config(hv_id):
+    hv_id = int(hv_id)
+    with _poll_cfg_lock:
+        cfg = _bastion_config.get(hv_id)
+        if cfg is None:
+            cfg = _new_poll_config()
+            _bastion_config[hv_id] = cfg
+        return cfg.copy()
+
+
+def _drop_bastion_poll_config(hv_id):
+    with _poll_cfg_lock:
+        _bastion_config.pop(int(hv_id), None)
+
+
+def _get_bastion_polling_status_map(conn):
+    status = {}
+    for hv_id in _list_standard_bastion_ids(conn):
+        status[f"{BASTION_TARGET_PREFIX}{hv_id}"] = _ensure_bastion_poll_config(hv_id)
+    return status
+
+
+def _get_poll_target_last_polled_map(conn):
+    last_polled = _get_topology_last_polled_map(conn)
+    rows = conn.execute("""
+        SELECT h.id AS hypervisor_id, MAX(ms.ts) AS last_polled_at
+        FROM memory_samples ms
+        JOIN devices d ON ms.device_id = d.id
+        JOIN hypervisors h ON d.hypervisor_id = h.id
+        WHERE h.topology_id = 'standard_testbeds'
+        GROUP BY h.id
+    """).fetchall()
+    for row in rows:
+        last_polled[f"{BASTION_TARGET_PREFIX}{row['hypervisor_id']}"] = row["last_polled_at"]
+    return last_polled
+
+
+def _parse_poll_target(target):
+    if target in TOPOLOGIES:
+        return "topology", target
+    if isinstance(target, str) and target.startswith(BASTION_TARGET_PREFIX):
+        try:
+            return "bastion", int(target[len(BASTION_TARGET_PREFIX):])
+        except ValueError:
+            return None, None
+    return None, None
+
+
 @contextmanager
 def get_db():
     try:
@@ -1347,32 +1414,50 @@ def _release_poll_device(device_id):
         _active_poll_devices.discard(device_id)
 
 
-def run_poll(topo_ids=None):
+def run_poll(poll_targets=None):
     global _op_name
     if not _op_lock.acquire(blocking=False):
         log.info(f"Poll skipped — {_op_name} already running")
         return
     _op_name = "poll"
     try:
-        _run_poll(topo_ids)
+        _run_poll(poll_targets)
     finally:
         _op_lock.release()
         _op_name = ""
 
 
-def _run_poll(topo_ids=None):
+def _run_poll(poll_targets=None):
     with get_db() as conn:
         q = """
             SELECT d.*, h.ip AS hypervisor_ip, h.topology_id
             FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
             WHERE NOT (d.console_port >= 2200 AND d.console_port <= 2299)
         """
-        if topo_ids:
-            ph = ",".join("?" * len(topo_ids))
-            q += f" AND h.topology_id IN ({ph})"
-            devices = [dict(r) for r in conn.execute(q, topo_ids).fetchall()]
-        else:
-            devices = [dict(r) for r in conn.execute(q).fetchall()]
+        params = []
+        if poll_targets:
+            topology_ids = []
+            bastion_ids = []
+            for target in poll_targets:
+                kind, value = _parse_poll_target(target)
+                if kind == "topology":
+                    topology_ids.append(value)
+                elif kind == "bastion":
+                    bastion_ids.append(value)
+            clauses = []
+            if topology_ids:
+                ph = ",".join("?" * len(topology_ids))
+                clauses.append(f"h.topology_id IN ({ph})")
+                params.extend(topology_ids)
+            if bastion_ids:
+                ph = ",".join("?" * len(bastion_ids))
+                clauses.append(f"(h.topology_id='standard_testbeds' AND h.id IN ({ph}))")
+                params.extend(bastion_ids)
+            if not clauses:
+                log.warning("Poll skipped — no valid poll targets in %s", poll_targets)
+                return
+            q += " AND (" + " OR ".join(clauses) + ")"
+        devices = [dict(r) for r in conn.execute(q, params).fetchall()]
 
     if not devices:
         log.info("No devices in DB yet — waiting for discovery")
@@ -2247,9 +2332,10 @@ _polling_paused = False
 
 # Per-topology polling configuration (runtime-mutable, disabled by default)
 _topo_config = {
-    tid: {"enabled": False, "poll_interval": POLL_INTERVAL}
+    tid: _new_poll_config()
     for tid in TOPOLOGIES
 }
+_bastion_config = {}
 
 
 def background_loop():
@@ -2259,19 +2345,40 @@ def background_loop():
     while True:
         if not _polling_paused:
             now = time.time()
-            # Poll devices only for enabled topologies at their own interval
-            topo_due = [
-                tid for tid in TOPOLOGIES
-                if _topo_config.get(tid, {}).get("enabled", True)
-                and time.time() - last_poll[tid] >= _topo_config.get(tid, {}).get("poll_interval", POLL_INTERVAL)
-            ]
-            if topo_due:
+            with get_db() as conn:
+                bastion_ids = _list_standard_bastion_ids(conn)
+            bastion_targets = [f"{BASTION_TARGET_PREFIX}{hv_id}" for hv_id in bastion_ids]
+            for target in bastion_targets:
+                last_poll.setdefault(target, 0)
+            with _poll_cfg_lock:
+                topo_cfg = {tid: cfg.copy() for tid, cfg in _topo_config.items()}
+                bastion_cfg = {
+                    hv_id: _bastion_config.get(hv_id, _new_poll_config()).copy()
+                    for hv_id in bastion_ids
+                }
+            due_targets = []
+            for tid, cfg in topo_cfg.items():
+                if tid == "standard_testbeds":
+                    continue
+                if cfg["enabled"] and now - last_poll[tid] >= cfg["poll_interval"]:
+                    due_targets.append(tid)
+            std_cfg = topo_cfg.get("standard_testbeds", _new_poll_config())
+            if std_cfg["enabled"]:
+                if now - last_poll["standard_testbeds"] >= std_cfg["poll_interval"]:
+                    due_targets.append("standard_testbeds")
+            else:
+                for hv_id, cfg in bastion_cfg.items():
+                    target = f"{BASTION_TARGET_PREFIX}{hv_id}"
+                    if cfg["enabled"] and now - last_poll[target] >= cfg["poll_interval"]:
+                        due_targets.append(target)
+            if due_targets:
                 try:
-                    run_poll(topo_due)
+                    run_poll(due_targets)
                 except Exception as exc:
                     log.error(f"Poll error: {exc}")
-                for tid in topo_due:
-                    last_poll[tid] = time.time()
+                finished_at = time.time()
+                for target in due_targets:
+                    last_poll[target] = finished_at
             if now - last_purge >= 3600:
                 try:
                     purge_old_samples()
@@ -2971,17 +3078,27 @@ def api_poll_now():
 @app.route("/api/polling/status")
 def api_polling_status():
     with get_db() as conn:
-        topo_last_polled = _get_topology_last_polled_map(conn)
+        target_last_polled = _get_poll_target_last_polled_map(conn)
+        bastion_cfg = _get_bastion_polling_status_map(conn)
+    with _poll_cfg_lock:
+        topo_cfg = {tid: cfg.copy() for tid, cfg in _topo_config.items()}
+    targets = {
+        tid: {
+            "enabled": cfg["enabled"],
+            "poll_interval": cfg["poll_interval"],
+            "last_polled_at": target_last_polled.get(tid),
+        }
+        for tid, cfg in topo_cfg.items()
+    }
+    for target, cfg in bastion_cfg.items():
+        targets[target] = {
+            "enabled": cfg["enabled"],
+            "poll_interval": cfg["poll_interval"],
+            "last_polled_at": target_last_polled.get(target),
+        }
     return jsonify({
         "paused": _polling_paused,
-        "topologies": {
-            tid: {
-                "enabled": cfg["enabled"],
-                "poll_interval": cfg["poll_interval"],
-                "last_polled_at": topo_last_polled.get(tid),
-            }
-            for tid, cfg in _topo_config.items()
-        },
+        "topologies": targets,
     })
 
 
@@ -2996,17 +3113,37 @@ def api_polling_toggle():
 
 @app.route("/api/polling/config", methods=["POST"])
 def api_polling_config():
-    """Update per-topology polling config (enabled, poll_interval)."""
+    """Update polling config for a topology or standard-testbed bastion."""
     data = request.get_json(force=True) or {}
-    tid = data.get("topology")
-    if not tid or tid not in _topo_config:
+    target = data.get("topology")
+    kind, value = _parse_poll_target(target)
+    if not target or kind is None:
         return jsonify({"error": "invalid topology"}), 400
-    if "enabled" in data:
-        _topo_config[tid]["enabled"] = bool(data["enabled"])
-    if "poll_interval" in data:
-        _topo_config[tid]["poll_interval"] = max(60, min(3600, int(data["poll_interval"])))
-    log.info(f"Topology [{tid}] config updated: {_topo_config[tid]}")
-    return jsonify({"topology": tid, **_topo_config[tid]})
+    if kind == "bastion":
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM hypervisors WHERE id=? AND topology_id='standard_testbeds'",
+                (value,),
+            ).fetchone()
+        if not row:
+            return jsonify({"error": "invalid topology"}), 400
+    with _poll_cfg_lock:
+        if kind == "topology":
+            cfg = _topo_config[value]
+        else:
+            cfg = _bastion_config.setdefault(value, _new_poll_config())
+        if "enabled" in data:
+            cfg["enabled"] = bool(data["enabled"])
+        if "poll_interval" in data:
+            cfg["poll_interval"] = max(60, min(3600, int(data["poll_interval"])))
+        updated = cfg.copy()
+    with get_db() as conn:
+        if kind == "topology":
+            last_polled_at = _get_last_polled_at(conn, value)
+        else:
+            last_polled_at = _get_last_polled_at(conn, "standard_testbeds", value)
+    log.info(f"Polling target [{target}] config updated: {updated}")
+    return jsonify({"topology": target, **updated, "last_polled_at": last_polled_at})
 
 
 @app.route("/api/bastion/list")
@@ -3059,6 +3196,7 @@ def api_bastion_delete(hv_id):
         conn.execute(
             "DELETE FROM hypervisors WHERE id = ? AND topology_id = 'standard_testbeds'",
             (hv_id,))
+    _drop_bastion_poll_config(hv_id)
     return jsonify({"status": "deleted", "id": hv_id})
 
 

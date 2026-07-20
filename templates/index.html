@@ -683,7 +683,7 @@ async function switchMainTab(which, options={}) {
   document.getElementById("statusPanel").style.display        = isStatus   ? "block" : "none";
   document.getElementById("mainContent").style.display        = (isReports || isStatus) ? "none"  : "block";
   document.getElementById("topoLabel").style.display          = (isReports || isStatus) ? "none"  : "block";
-  document.getElementById("topoPollingBar").style.display     = (isReports || isStatus || isStandard) ? "none" : "block";
+  document.getElementById("topoPollingBar").style.display     = (isReports || isStatus) ? "none" : "block";
   updateScrollTopButton();
 
   if (isStatus) {
@@ -1911,7 +1911,7 @@ function updatePollStatus(paused) {
   }
 }
 
-let _topoPollingCache = {};  // cached per-topology config
+let _topoPollingCache = {};  // cached per-target config (topology or bastion)
 
 async function checkPollStatus() {
   try {
@@ -1923,36 +1923,83 @@ async function checkPollStatus() {
 }
 
 function _getActiveTopoIds() {
-  // Polling config is scoped to the currently selected topology/TB.
-  return [currentTopology];
+  return [_getActivePollingTargetId()];
+}
+
+function _getActivePollingTargetId() {
+  return (currentTopology === "standard_testbeds" && currentBastionId != null)
+    ? `bastion_${currentBastionId}`
+    : currentTopology;
+}
+
+function _getActivePollingTargetLabel() {
+  if (currentTopology !== "standard_testbeds") {
+    return TOPO_LABELS[currentTopology] || currentTopology;
+  }
+  if (currentBastionId == null) {
+    return "All Standard Testbeds";
+  }
+  return document.querySelector(`.std-bastion-pill[data-hv-id="${currentBastionId}"]`)?.dataset.hvName
+    || `Bastion ${currentBastionId}`;
+}
+
+function _getEffectivePollingConfig() {
+  const defaultCfg = {enabled: false, poll_interval: 900, last_polled_at: null};
+  const targetId = _getActivePollingTargetId();
+  const targetCfg = {...defaultCfg, ...(_topoPollingCache[targetId] || {})};
+  if (currentTopology === "standard_testbeds" && currentBastionId != null) {
+    const allCfg = {...defaultCfg, ...(_topoPollingCache.standard_testbeds || {})};
+    if (allCfg.enabled) {
+      return {
+        targetId,
+        cfg: {...allCfg, last_polled_at: targetCfg.last_polled_at || allCfg.last_polled_at},
+        locked: true,
+        label: _getActivePollingTargetLabel(),
+        lockReason: "Inherited from All Standard Testbeds",
+      };
+    }
+  }
+  return {
+    targetId,
+    cfg: targetCfg,
+    locked: false,
+    label: _getActivePollingTargetLabel(),
+    lockReason: "",
+  };
 }
 
 function updateTopoPollingBar() {
   const bar = document.getElementById("topoPollingBar");
   const reportsVisible = document.getElementById("reportsPanel").style.display !== "none";
   const statusVisible = document.getElementById("statusPanel").style.display !== "none";
-  // Only show for live topology views, never in reports/status/standard-testbeds.
-  if (reportsVisible || statusVisible || currentTopology === "standard_testbeds" ||
-      (currentTopology !== "chennai" && !currentTopology.startsWith("sc_tb"))) {
+  const supported = currentTopology === "chennai"
+    || currentTopology === "standard_testbeds"
+    || currentTopology.startsWith("sc_tb");
+  if (reportsVisible || statusVisible || !supported) {
     bar.style.display = "none";
     return;
   }
   bar.style.display = "block";
-  const topoIds = _getActiveTopoIds();
-  const cfg = _topoPollingCache[topoIds[0]] || {enabled: true, poll_interval: 900};
+  const {cfg, locked, label, lockReason} = _getEffectivePollingConfig();
   const btn = document.getElementById("btnTopoPolling");
   const icon = document.getElementById("topoPollingIcon");
   const state = document.getElementById("topoPollingState");
+  const labelEl = document.getElementById("topoPollingLabel");
+  labelEl.textContent = `Polling: ${label}`;
   if (cfg.enabled) {
     btn.className = "btn btn-sm btn-outline-success";
     icon.className = "bi bi-toggle-on me-1";
-    state.textContent = "Enabled";
+    state.textContent = locked ? "Enabled (All)" : "Enabled";
   } else {
     btn.className = "btn btn-sm btn-outline-danger";
     icon.className = "bi bi-toggle-off me-1";
     state.textContent = "Disabled";
   }
   const sel = document.getElementById("topoIntervalSelect");
+  btn.disabled = locked;
+  sel.disabled = locked;
+  btn.title = lockReason;
+  sel.title = lockReason;
   sel.value = String(cfg.poll_interval);
   // If value not in options, select closest
   if (sel.value !== String(cfg.poll_interval)) {
@@ -1963,35 +2010,47 @@ function updateTopoPollingBar() {
 }
 
 async function toggleTopoPolling() {
-  const topoIds = _getActiveTopoIds();
-  const cfg = _topoPollingCache[topoIds[0]] || {enabled: true};
-  const newEnabled = !cfg.enabled;
-  for (const tid of topoIds) {
-    await fetch("/api/polling/config", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({topology: tid, enabled: newEnabled})
-    });
-    _topoPollingCache[tid] = {...(_topoPollingCache[tid] || {}), enabled: newEnabled};
+  try {
+    const topoIds = _getActiveTopoIds();
+    const {cfg, label} = _getEffectivePollingConfig();
+    const newEnabled = !cfg.enabled;
+    for (const tid of topoIds) {
+      const r = await fetch("/api/polling/config", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({topology: tid, enabled: newEnabled})
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+      _topoPollingCache[tid] = {...(_topoPollingCache[tid] || {}), ...d};
+    }
+    updateTopoPollingBar();
+    toast(`${label}: polling ${newEnabled ? "enabled" : "disabled"}`);
+  } catch (err) {
+    toast(`Polling update failed: ${err.message || err}`, "error");
   }
-  updateTopoPollingBar();
-  const topoLabel = TOPO_LABELS[topoIds[0]] || topoIds[0];
-  toast(`${topoLabel}: polling ${newEnabled ? "enabled" : "disabled"}`);
 }
 
 async function changeTopoInterval() {
-  const interval = parseInt(document.getElementById("topoIntervalSelect").value);
-  const topoIds = _getActiveTopoIds();
-  for (const tid of topoIds) {
-    await fetch("/api/polling/config", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({topology: tid, poll_interval: interval})
-    });
-    _topoPollingCache[tid] = {...(_topoPollingCache[tid] || {}), poll_interval: interval};
+  try {
+    const interval = parseInt(document.getElementById("topoIntervalSelect").value);
+    const topoIds = _getActiveTopoIds();
+    const {label} = _getEffectivePollingConfig();
+    for (const tid of topoIds) {
+      const r = await fetch("/api/polling/config", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({topology: tid, poll_interval: interval})
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+      _topoPollingCache[tid] = {...(_topoPollingCache[tid] || {}), ...d};
+    }
+    updateTopoPollingBar();
+    toast(`${label}: poll interval set to ${interval}s`);
+  } catch (err) {
+    toast(`Polling interval update failed: ${err.message || err}`, "error");
   }
-  const topoLabel = TOPO_LABELS[topoIds[0]] || topoIds[0];
-  toast(`${topoLabel}: poll interval set to ${interval}s`);
 }
 
 // ── Recording ─────────────────────────────────────────────────────────────────
