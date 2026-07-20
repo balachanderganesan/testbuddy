@@ -1,3 +1,4 @@
 .venv/
+.env
 vcmem.db-shm
 vcmem.db-wal

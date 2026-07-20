@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from pathlib import Path
+from urllib import error as urllib_error, request as urllib_request
 
 import paramiko
 from flask import Flask, jsonify, render_template, request, Response, stream_with_context
@@ -35,6 +36,7 @@ from flask import Flask, jsonify, render_template, request, Response, stream_wit
 BASE_DIR     = Path(__file__).parent
 SERVERS_JSON = BASE_DIR / "servers.json"
 DB_PATH      = str(BASE_DIR / "vcmem.db")
+DOTENV_PATH  = Path(os.getenv("TESTBUDDY_DOTENV_PATH", str(BASE_DIR / ".env")))
 
 POLL_INTERVAL        = 900    # seconds between polls (15 min)
 SSH_TIMEOUT          = 15     # SSH connect + exec timeout (seconds)
@@ -91,6 +93,73 @@ CRIT_FREE_PCT   =  8.0   # critical if free < 8%
 TREND_SAMPLES   = 20     # samples used for slope calculation
 WARN_SLOPE_KB_H = -200   # warn  if trending down > 200 KB/h
 CRIT_SLOPE_KB_H = -800   # crit  if trending down > 800 KB/h
+
+
+def _load_dotenv(path):
+    if not path.exists():
+        return
+    try:
+        for raw_line in path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            key, sep, value = line.partition("=")
+            if not sep:
+                continue
+            key = key.strip()
+            if not key or key in os.environ:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            os.environ[key] = value
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Unable to read dotenv file %s: %s", path, exc)
+
+
+def _env_flag(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name, default):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _split_env_values(raw):
+    if not raw:
+        return ()
+    return tuple(item for item in re.split(r"[\s,]+", raw.strip()) if item)
+
+
+def _load_google_chat_webhooks():
+    raw = (
+        os.getenv("TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URLS")
+        or os.getenv("TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URL")
+        or ""
+    )
+    # Preserve order while removing duplicates.
+    return tuple(dict.fromkeys(_split_env_values(raw)))
+
+
+_load_dotenv(DOTENV_PATH)
+
+GOOGLE_CHAT_WEBHOOKS = _load_google_chat_webhooks()
+GOOGLE_CHAT_TIMEOUT = max(1, _env_int("TESTBUDDY_GOOGLE_CHAT_TIMEOUT", 10))
+GOOGLE_CHAT_NOTIFY_RECOVERIES = _env_flag(
+    "TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES",
+    default=False,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -220,6 +289,27 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_dc_dev_type_ts
                 ON device_checks(device_id, check_type, ts DESC);
+
+            CREATE TABLE IF NOT EXISTS alert_notification_state (
+                alert_key         TEXT PRIMARY KEY,
+                topology_id       TEXT    NOT NULL,
+                hypervisor_id     INTEGER,
+                device_id         INTEGER,
+                device_name       TEXT,
+                device_ip         TEXT,
+                hypervisor_name   TEXT,
+                alert_source      TEXT    NOT NULL,
+                last_level        TEXT    NOT NULL,
+                last_fingerprint  TEXT,
+                alert_detail      TEXT,
+                active            INTEGER NOT NULL DEFAULT 1,
+                opened_at         TEXT,
+                last_seen_at      TEXT,
+                last_notified_at  TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ans_scope_active
+                ON alert_notification_state(topology_id, hypervisor_id, active);
         """)
         # Migrate existing DB: add new columns if absent
         _add_col_if_missing(conn, "recording_sessions", "poll_interval_sec INTEGER DEFAULT 300")
@@ -246,6 +336,17 @@ def init_db():
         _add_col_if_missing(conn, "devices", "prev_stale_td_count INTEGER")
         _add_col_if_missing(conn, "hypervisors", "topology_id TEXT DEFAULT 'chennai'")
         _add_col_if_missing(conn, "device_checks", "dismissed INTEGER DEFAULT 0")
+        _add_col_if_missing(conn, "alert_notification_state", "hypervisor_id INTEGER")
+        _add_col_if_missing(conn, "alert_notification_state", "device_id INTEGER")
+        _add_col_if_missing(conn, "alert_notification_state", "device_name TEXT")
+        _add_col_if_missing(conn, "alert_notification_state", "device_ip TEXT")
+        _add_col_if_missing(conn, "alert_notification_state", "hypervisor_name TEXT")
+        _add_col_if_missing(conn, "alert_notification_state", "last_fingerprint TEXT")
+        _add_col_if_missing(conn, "alert_notification_state", "alert_detail TEXT")
+        _add_col_if_missing(conn, "alert_notification_state", "active INTEGER NOT NULL DEFAULT 1")
+        _add_col_if_missing(conn, "alert_notification_state", "opened_at TEXT")
+        _add_col_if_missing(conn, "alert_notification_state", "last_seen_at TEXT")
+        _add_col_if_missing(conn, "alert_notification_state", "last_notified_at TEXT")
         _add_col_if_missing(conn, "memory_samples", "core_files_json TEXT")
         _add_col_if_missing(conn, "memory_samples", "ha_core_files_json TEXT")
         for col in [
@@ -1551,6 +1652,7 @@ def _run_poll(poll_targets=None):
     if timed_out:
         log.warning("Poll completed with %d timed out device(s)", len(timed_out))
     log.info("Poll complete")
+    _notify_google_chat_for_poll_targets(poll_targets)
 
 
 # ── Anomaly detection ─────────────────────────────────────────────────────────
@@ -1678,6 +1780,487 @@ def _memory_alert_first_seen(conn, device_id, pid, current_alert):
             streak_start = None
 
     return streak_start
+
+
+ALERT_SEVERITY_RANK = {"ok": 0, "warning": 1, "critical": 2}
+CHECK_ALERT_LABELS = {
+    "tunnel": "Tunnel Status",
+    "route": "Route Summary",
+    "path": "Path Summary",
+    "stale_pi": "Stale PI Flows",
+    "stale_td": "Stale TD Flows",
+    "health": "Health Report",
+    "memory_top10": "Memory Top 10",
+    "dpdk_leak": "DPDK Leaks",
+    "ha_panic": "HA Active/Active Panic",
+    "core_dump": "Core Dump",
+    "memory": "Memory",
+}
+
+
+def _epoch_to_iso(ts):
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return None
+    if ts <= 0:
+        return None
+    return datetime.utcfromtimestamp(ts).isoformat()
+
+
+def _deserialize_json_list(raw):
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _format_core_alert_detail(core_files, ha_core_files):
+    parts = []
+    if core_files:
+        names = ", ".join(f.get("name") or "unknown" for f in core_files[:4])
+        if len(core_files) > 4:
+            names += f", +{len(core_files) - 4} more"
+        parts.append(f"active={len(core_files)} [{names}]")
+    if ha_core_files:
+        names = ", ".join(f.get("name") or "unknown" for f in ha_core_files[:4])
+        if len(ha_core_files) > 4:
+            names += f", +{len(ha_core_files) - 4} more"
+        parts.append(f"ha={len(ha_core_files)} [{names}]")
+    return "; ".join(parts)
+
+
+def _load_scope_devices(conn, topology_id, hypervisor_id=None):
+    if hypervisor_id is not None:
+        where = "d.hypervisor_id=? AND h.topology_id=?"
+        params = (hypervisor_id, topology_id)
+    else:
+        where = "h.topology_id=?"
+        params = (topology_id,)
+    return [dict(r) for r in conn.execute(f"""
+        SELECT d.id, d.device_type, d.ip, d.vm_name, d.reachable, d.last_seen,
+               d.core_files, d.ha_core_files, d.console_port,
+               h.id AS hypervisor_id, h.name AS hypervisor_name
+        FROM devices d
+        JOIN hypervisors h ON d.hypervisor_id = h.id
+        WHERE {where}
+          AND NOT (d.console_port >= 2200 AND d.console_port <= 2299)
+        ORDER BY d.device_type, h.name, d.ip
+    """, params).fetchall()]
+
+
+def _collect_active_alerts(topology_id, hypervisor_id=None, include_core=False):
+    with get_db() as conn:
+        devices = _load_scope_devices(conn, topology_id, hypervisor_id)
+        if hypervisor_id is not None:
+            hv_row = conn.execute(
+                "SELECT name FROM hypervisors WHERE id=? AND topology_id=?",
+                (hypervisor_id, topology_id),
+            ).fetchone()
+            hypervisor_name = hv_row["name"] if hv_row else f"hypervisor {hypervisor_id}"
+        else:
+            hypervisor_name = None
+
+        if hypervisor_id is not None:
+            check_where = "d.hypervisor_id = ? AND h.topology_id = ?"
+            check_params = (hypervisor_id, topology_id)
+        else:
+            check_where = "h.topology_id = ?"
+            check_params = (topology_id,)
+        check_rows = [dict(r) for r in conn.execute(f"""
+            SELECT dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail, dc.ts,
+                   (
+                       SELECT MIN(dc3.ts)
+                       FROM device_checks dc3
+                       WHERE dc3.device_id = dc.device_id
+                         AND dc3.check_type = dc.check_type
+                         AND dc3.alert_level != 'ok'
+                         AND dc3.ts > COALESCE((
+                             SELECT MAX(dc4.ts)
+                             FROM device_checks dc4
+                             WHERE dc4.device_id = dc.device_id
+                               AND dc4.check_type = dc.check_type
+                               AND dc4.alert_level = 'ok'
+                               AND dc4.ts < dc.ts
+                         ), '')
+                   ) AS first_seen,
+                   d.device_type, d.ip, d.vm_name,
+                   h.id AS hypervisor_id, h.name AS hypervisor_name
+            FROM device_checks dc
+            JOIN devices d ON dc.device_id = d.id
+            JOIN hypervisors h ON d.hypervisor_id = h.id
+            WHERE {check_where}
+              AND dc.alert_level != 'ok'
+              AND COALESCE(dc.dismissed, 0) = 0
+              AND dc.ts = (
+                  SELECT MAX(dc2.ts) FROM device_checks dc2
+                  WHERE dc2.device_id = dc.device_id
+                    AND dc2.check_type = dc.check_type
+              )
+        """, check_params).fetchall()]
+
+    alerts = []
+
+    for dev in devices:
+        if dev["reachable"]:
+            st = get_device_status(dev["id"])
+            if st["alert"] in ("warning", "critical"):
+                cur = st.get("current") or {}
+                with get_db() as conn:
+                    first_seen = _memory_alert_first_seen(
+                        conn,
+                        dev["id"],
+                        cur.get("pid"),
+                        st["alert"],
+                    )
+                alerts.append({
+                    "device_id": dev["id"],
+                    "device_type": dev["device_type"],
+                    "ip": dev["ip"],
+                    "vm_name": dev.get("vm_name") or dev["ip"],
+                    "hypervisor_id": dev["hypervisor_id"],
+                    "hypervisor": dev["hypervisor_name"],
+                    "alert": st["alert"],
+                    "alert_source": "memory",
+                    "first_seen": first_seen,
+                    "slope_kb_h": st["slope_kb_h"],
+                    "current": st["current"],
+                    "ha": st["ha"],
+                    "ts": cur.get("ts"),
+                })
+
+        if include_core:
+            core_files = _deserialize_json_list(dev.get("core_files"))
+            ha_core_files = _deserialize_json_list(dev.get("ha_core_files"))
+            if core_files or ha_core_files:
+                file_times = [
+                    int(f.get("ts") or 0)
+                    for f in (core_files + ha_core_files)
+                    if isinstance(f, dict)
+                ]
+                file_times = [ts for ts in file_times if ts > 0]
+                alerts.append({
+                    "device_id": dev["id"],
+                    "device_type": dev["device_type"],
+                    "ip": dev["ip"],
+                    "vm_name": dev.get("vm_name") or dev["ip"],
+                    "hypervisor_id": dev["hypervisor_id"],
+                    "hypervisor": dev["hypervisor_name"],
+                    "alert": "critical",
+                    "alert_source": "core_dump",
+                    "alert_detail": _format_core_alert_detail(core_files, ha_core_files),
+                    "first_seen": _epoch_to_iso(min(file_times)) if file_times else dev.get("last_seen"),
+                    "ts": dev.get("last_seen"),
+                    "current": None,
+                    "ha": None,
+                    "core_files": core_files,
+                    "ha_core_files": ha_core_files,
+                })
+
+    for row in check_rows:
+        alerts.append({
+            "device_id": row["device_id"],
+            "device_type": row["device_type"],
+            "ip": row["ip"],
+            "vm_name": row.get("vm_name") or row["ip"],
+            "hypervisor_id": row["hypervisor_id"],
+            "hypervisor": row["hypervisor_name"],
+            "alert": row["alert_level"],
+            "alert_source": row["check_type"],
+            "alert_detail": row["alert_detail"],
+            "first_seen": row["first_seen"],
+            "ts": row["ts"],
+            "slope_kb_h": None,
+            "current": None,
+            "ha": None,
+        })
+
+    alerts.sort(key=lambda a: (
+        -ALERT_SEVERITY_RANK.get(a["alert"], 0),
+        a.get("first_seen") or "",
+        a.get("vm_name") or a["ip"],
+    ))
+    scope_label = TOPOLOGIES.get(topology_id, {}).get("label", topology_id)
+    if hypervisor_name:
+        scope_label = f"{scope_label} / {hypervisor_name}"
+    return alerts, {
+        "topology_id": topology_id,
+        "hypervisor_id": hypervisor_id,
+        "hypervisor_name": hypervisor_name,
+        "label": scope_label,
+    }
+
+
+def _alert_key(alert):
+    return f"{alert['device_id']}:{alert['alert_source']}"
+
+
+def _alert_fingerprint(alert):
+    source = alert["alert_source"]
+    if source == "memory":
+        current = alert.get("current") or {}
+        payload = {
+            "alert": alert["alert"],
+            "pid": current.get("pid"),
+            "first_seen": alert.get("first_seen"),
+        }
+    elif source == "core_dump":
+        payload = {
+            "active": sorted(
+                (f.get("name") or "", int(f.get("ts") or 0))
+                for f in alert.get("core_files", [])
+                if isinstance(f, dict)
+            ),
+            "ha": sorted(
+                (f.get("name") or "", int(f.get("ts") or 0))
+                for f in alert.get("ha_core_files", [])
+                if isinstance(f, dict)
+            ),
+        }
+    else:
+        payload = {
+            "alert": alert["alert"],
+            "first_seen": alert.get("first_seen"),
+            "detail": alert.get("alert_detail"),
+        }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _fmt_kb_as_mb(kb_value):
+    try:
+        return f"{int(kb_value) / 1024:.1f} MB"
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def _alert_line(alert):
+    name = alert.get("vm_name") or alert["ip"]
+    label = CHECK_ALERT_LABELS.get(alert["alert_source"], alert["alert_source"])
+    prefix = f"{alert['alert'].upper()} {label} - {name} ({alert['ip']}"
+    if alert.get("hypervisor"):
+        prefix += f" on {alert['hypervisor']}"
+    prefix += ")"
+
+    if alert["alert_source"] == "memory":
+        current = alert.get("current") or {}
+        details = []
+        free_pct = current.get("free_pct")
+        if free_pct is not None:
+            details.append(f"{free_pct}% free")
+        if current.get("mem_free_kb") is not None:
+            details.append(f"{_fmt_kb_as_mb(current['mem_free_kb'])} free")
+        slope = alert.get("slope_kb_h")
+        if slope is not None:
+            details.append(f"slope {slope} KB/h")
+        return f"{prefix}: {', '.join(details)}" if details else prefix
+
+    if alert["alert_source"] == "core_dump":
+        return f"{prefix}: {alert.get('alert_detail') or 'core files present'}"
+
+    if alert.get("alert_detail"):
+        return f"{prefix}: {alert['alert_detail']}"
+    return prefix
+
+
+def _recovered_alert_line(row):
+    name = row.get("device_name") or row.get("device_ip") or f"device {row.get('device_id')}"
+    label = CHECK_ALERT_LABELS.get(row["alert_source"], row["alert_source"])
+    prefix = f"{label} recovered - {name}"
+    if row.get("device_ip"):
+        prefix += f" ({row['device_ip']}"
+        if row.get("hypervisor_name"):
+            prefix += f" on {row['hypervisor_name']}"
+        prefix += ")"
+    return prefix
+
+
+def _build_google_chat_message(scope, new_alerts, escalated_alerts, updated_alerts, recovered_rows):
+    lines = [
+        "TestBuddy alert update",
+        f"Target: {scope['label']}",
+        f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
+    ]
+
+    def _append_section(title, rows, formatter):
+        if not rows:
+            return
+        lines.append("")
+        lines.append(f"{title} ({len(rows)}):")
+        for row in rows[:15]:
+            lines.append(f"- {formatter(row)}")
+        if len(rows) > 15:
+            lines.append(f"- ... {len(rows) - 15} more")
+
+    _append_section("New alerts", new_alerts, _alert_line)
+    _append_section("Escalated alerts", escalated_alerts, _alert_line)
+    _append_section("Updated alerts", updated_alerts, _alert_line)
+    if GOOGLE_CHAT_NOTIFY_RECOVERIES:
+        _append_section("Recovered alerts", recovered_rows, _recovered_alert_line)
+
+    return "\n".join(lines)
+
+
+def _send_google_chat_message(text):
+    if not GOOGLE_CHAT_WEBHOOKS:
+        return
+
+    body = json.dumps({"text": text}).encode("utf-8")
+    for idx, webhook_url in enumerate(GOOGLE_CHAT_WEBHOOKS, start=1):
+        req = urllib_request.Request(
+            webhook_url,
+            data=body,
+            headers={"Content-Type": "application/json; charset=UTF-8"},
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=GOOGLE_CHAT_TIMEOUT) as resp:
+                resp.read()
+            log.info("Google Chat alert delivered to webhook #%d", idx)
+        except (urllib_error.URLError, urllib_error.HTTPError, TimeoutError) as exc:
+            log.warning("Google Chat delivery failed for webhook #%d: %s", idx, exc)
+
+
+def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
+    alerts, scope = _collect_active_alerts(topology_id, hypervisor_id, include_core=True)
+    now = datetime.utcnow().isoformat()
+    current_by_key = {_alert_key(alert): alert for alert in alerts}
+
+    with get_db() as conn:
+        if hypervisor_id is None:
+            existing_rows = [dict(r) for r in conn.execute("""
+                SELECT *
+                FROM alert_notification_state
+                WHERE topology_id = ?
+            """, (topology_id,)).fetchall()]
+        else:
+            existing_rows = [dict(r) for r in conn.execute("""
+                SELECT *
+                FROM alert_notification_state
+                WHERE topology_id = ? AND hypervisor_id = ?
+            """, (topology_id, hypervisor_id)).fetchall()]
+
+        existing_by_key = {row["alert_key"]: row for row in existing_rows}
+        new_alerts = []
+        escalated_alerts = []
+        updated_alerts = []
+
+        for key, alert in current_by_key.items():
+            prev = existing_by_key.get(key)
+            fingerprint = _alert_fingerprint(alert)
+            previous_level = prev["last_level"] if prev else "ok"
+            event_type = None
+
+            if not prev or not prev.get("active"):
+                event_type = "new"
+            elif ALERT_SEVERITY_RANK.get(alert["alert"], 0) > ALERT_SEVERITY_RANK.get(previous_level, 0):
+                event_type = "escalated"
+            elif alert["alert_source"] == "core_dump" and fingerprint != (prev.get("last_fingerprint") or ""):
+                event_type = "updated"
+
+            if event_type == "new":
+                new_alerts.append(alert)
+            elif event_type == "escalated":
+                escalated_alerts.append(alert)
+            elif event_type == "updated":
+                updated_alerts.append(alert)
+
+            params = (
+                topology_id,
+                hypervisor_id,
+                alert["device_id"],
+                alert.get("vm_name") or alert["ip"],
+                alert["ip"],
+                alert.get("hypervisor"),
+                alert["alert_source"],
+                alert["alert"],
+                fingerprint,
+                alert.get("alert_detail"),
+                1,
+                alert.get("first_seen") or now,
+                now,
+                now if event_type else (prev.get("last_notified_at") if prev else None),
+                key,
+            )
+            if prev:
+                conn.execute("""
+                    UPDATE alert_notification_state
+                    SET topology_id=?, hypervisor_id=?, device_id=?, device_name=?,
+                        device_ip=?, hypervisor_name=?, alert_source=?, last_level=?,
+                        last_fingerprint=?, alert_detail=?, active=?, opened_at=?,
+                        last_seen_at=?, last_notified_at=?
+                    WHERE alert_key=?
+                """, params)
+            else:
+                conn.execute("""
+                    INSERT INTO alert_notification_state(
+                        topology_id, hypervisor_id, device_id, device_name,
+                        device_ip, hypervisor_name, alert_source, last_level,
+                        last_fingerprint, alert_detail, active, opened_at,
+                        last_seen_at, last_notified_at, alert_key
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, params)
+
+        recovered_rows = []
+        for key, row in existing_by_key.items():
+            if not row.get("active") or key in current_by_key:
+                continue
+            conn.execute("""
+                UPDATE alert_notification_state
+                SET active=0, last_seen_at=?
+                WHERE alert_key=?
+            """, (now, key))
+            if GOOGLE_CHAT_NOTIFY_RECOVERIES:
+                recovered_rows.append(row)
+
+    if not any((new_alerts, escalated_alerts, updated_alerts, recovered_rows)):
+        return
+
+    message = _build_google_chat_message(
+        scope,
+        new_alerts,
+        escalated_alerts,
+        updated_alerts,
+        recovered_rows,
+    )
+    _send_google_chat_message(message)
+
+
+def _notification_scopes_for_poll_targets(poll_targets=None):
+    if not poll_targets:
+        return [(topology_id, None) for topology_id in TOPOLOGIES]
+
+    scopes = []
+    topology_targets = set()
+    for target in poll_targets:
+        kind, value = _parse_poll_target(target)
+        if kind == "topology":
+            scope = (value, None)
+            if scope not in scopes:
+                scopes.append(scope)
+            topology_targets.add(value)
+        elif kind == "bastion":
+            scope = ("standard_testbeds", value)
+            if "standard_testbeds" not in topology_targets and scope not in scopes:
+                scopes.append(scope)
+    return scopes
+
+
+def _notify_google_chat_for_poll_targets(poll_targets=None):
+    if not GOOGLE_CHAT_WEBHOOKS:
+        return
+    for topology_id, hypervisor_id in _notification_scopes_for_poll_targets(poll_targets):
+        try:
+            _process_google_chat_alert_scope(topology_id, hypervisor_id)
+        except Exception as exc:
+            log.warning(
+                "Google Chat alert processing failed for topology=%s hypervisor=%s: %s",
+                topology_id,
+                hypervisor_id,
+                exc,
+            )
 
 
 def _iso_to_epoch_seconds(ts):
@@ -2717,94 +3300,7 @@ def api_device_core_download(device_id):
 def api_alerts():
     tid   = request.args.get("topology", "chennai")
     hv_id = request.args.get("hypervisor_id", type=int)
-    if hv_id:
-        dev_where = "d.hypervisor_id=? AND h.topology_id=?"
-        dev_args  = (hv_id, tid)
-    else:
-        dev_where = "h.topology_id=?"
-        dev_args  = (tid,)
-    with get_db() as conn:
-        devices = [dict(r) for r in conn.execute(f"""
-            SELECT d.id, d.device_type, d.ip, d.vm_name, d.reachable,
-                   h.name AS hypervisor_name
-            FROM devices d JOIN hypervisors h ON d.hypervisor_id=h.id
-            WHERE {dev_where}
-              AND d.reachable=1
-              AND NOT (d.console_port >= 2200 AND d.console_port <= 2299)
-        """, dev_args).fetchall()]
-
-    alerts = []
-    for dev in devices:
-        st = get_device_status(dev["id"])
-        if st["alert"] in ("warning", "critical"):
-            first_seen = None
-            cur = st.get("current") or {}
-            with get_db() as conn:
-                first_seen = _memory_alert_first_seen(conn, dev["id"], cur.get("pid"), st["alert"])
-            alerts.append({
-                "device_id":   dev["id"],
-                "device_type": dev["device_type"],
-                "ip":          dev["ip"],
-                "vm_name":     dev.get("vm_name") or dev["ip"],
-                "hypervisor":  dev["hypervisor_name"],
-                "alert":       st["alert"],
-                "alert_source": "memory",
-                "first_seen":  first_seen,
-                "slope_kb_h":  st["slope_kb_h"],
-                "current":     st["current"],
-                "ha":          st["ha"],
-            })
-
-    # Check-based alerts
-    with get_db() as conn:
-        check_alerts = [dict(r) for r in conn.execute("""
-            SELECT dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail, dc.ts,
-                   (
-                       SELECT MIN(dc3.ts)
-                       FROM device_checks dc3
-                       WHERE dc3.device_id = dc.device_id
-                         AND dc3.check_type = dc.check_type
-                         AND dc3.alert_level != 'ok'
-                         AND dc3.ts > COALESCE((
-                             SELECT MAX(dc4.ts)
-                             FROM device_checks dc4
-                             WHERE dc4.device_id = dc.device_id
-                               AND dc4.check_type = dc.check_type
-                               AND dc4.alert_level = 'ok'
-                               AND dc4.ts < dc.ts
-                         ), '')
-                   ) AS first_seen,
-                   d.device_type, d.ip, d.vm_name, h.name AS hypervisor_name
-            FROM device_checks dc
-            JOIN devices d ON dc.device_id = d.id
-            JOIN hypervisors h ON d.hypervisor_id = h.id
-            WHERE h.topology_id = ?
-              AND dc.alert_level != 'ok'
-              AND COALESCE(dc.dismissed, 0) = 0
-              AND dc.ts = (
-                  SELECT MAX(dc2.ts) FROM device_checks dc2
-                  WHERE dc2.device_id = dc.device_id
-                    AND dc2.check_type = dc.check_type
-              )
-        """, (tid,)).fetchall()]
-    for ca in check_alerts:
-        alerts.append({
-            "device_id":    ca["device_id"],
-            "device_type":  ca["device_type"],
-            "ip":           ca["ip"],
-            "vm_name":      ca.get("vm_name") or ca["ip"],
-            "hypervisor":   ca["hypervisor_name"],
-            "alert":        ca["alert_level"],
-            "alert_source": ca["check_type"],
-            "alert_detail": ca["alert_detail"],
-            "first_seen":   ca["first_seen"],
-            "ts":           ca["ts"],
-            "slope_kb_h":   None,
-            "current":      None,
-            "ha":           None,
-        })
-
-    alerts.sort(key=lambda x: (x["alert"] != "critical", x.get("slope_kb_h") or 0))
+    alerts, _ = _collect_active_alerts(tid, hv_id, include_core=False)
     return jsonify(alerts)
 
 
@@ -3048,6 +3544,13 @@ def api_status():
         },
         "threads": {
             "active": active_threads,
+        },
+        "notifications": {
+            "google_chat": {
+                "configured": bool(GOOGLE_CHAT_WEBHOOKS),
+                "webhook_count": len(GOOGLE_CHAT_WEBHOOKS),
+                "notify_recoveries": GOOGLE_CHAT_NOTIFY_RECOVERIES,
+            },
         },
         "db": {
             "devices":           db_devices,
@@ -3522,6 +4025,13 @@ if __name__ == "__main__":
     web_port = int(os.getenv("TESTBUDDY_PORT", "5001"))
     log.info("Initialising database...")
     init_db()
+    if GOOGLE_CHAT_WEBHOOKS:
+        log.info(
+            "Google Chat notifications enabled (%d webhook%s, recoveries=%s)",
+            len(GOOGLE_CHAT_WEBHOOKS),
+            "" if len(GOOGLE_CHAT_WEBHOOKS) == 1 else "s",
+            "on" if GOOGLE_CHAT_NOTIFY_RECOVERIES else "off",
+        )
     log.info("Starting background collector...")
     threading.Thread(target=background_loop, daemon=True).start()
     threading.Thread(target=recording_poll_manager, daemon=True).start()

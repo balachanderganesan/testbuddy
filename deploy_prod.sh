@@ -2,11 +2,20 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-$APP_DIR/.env}"
 VENV_DIR="${VENV_DIR:-$APP_DIR/.venv}"
 SERVICE_NAME="${SERVICE_NAME:-testbuddy}"
 APP_USER="${APP_USER:-$(id -un)}"
 APP_GROUP="${APP_GROUP:-$(id -gn)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    set +a
+fi
+
 TESTBUDDY_HOST="${TESTBUDDY_HOST:-0.0.0.0}"
 TESTBUDDY_PORT="${TESTBUDDY_PORT:-5001}"
 
@@ -44,6 +53,11 @@ echo "Deploying Test Buddy from $APP_DIR"
 echo "Using service name: $SERVICE_NAME"
 echo "Using app user/group: $APP_USER:$APP_GROUP"
 echo "Using bind address: $TESTBUDDY_HOST:$TESTBUDDY_PORT"
+if [[ -f "$ENV_FILE" ]]; then
+    echo "Using env file: $ENV_FILE"
+else
+    echo "Env file not found: $ENV_FILE (defaults and existing environment will be used)"
+fi
 
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     if [[ -d "$VENV_DIR" ]]; then
@@ -76,11 +90,10 @@ Wants=network-online.target
 Type=simple
 User=$APP_USER
 Group=$APP_GROUP
-WorkingDirectory=$APP_DIR
-Environment=PYTHONUNBUFFERED=1
-Environment=TESTBUDDY_HOST=$TESTBUDDY_HOST
-Environment=TESTBUDDY_PORT=$TESTBUDDY_PORT
-ExecStart=$VENV_DIR/bin/python $APP_DIR/app.py
+WorkingDirectory="$APP_DIR"
+Environment="PYTHONUNBUFFERED=1"
+Environment="TESTBUDDY_DOTENV_PATH=$ENV_FILE"
+ExecStart="$VENV_DIR/bin/python" "$APP_DIR/app.py"
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

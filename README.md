@@ -18,6 +18,7 @@ A real-time testbed verification dashboard for VeloCloud SD-WAN infrastructure. 
   - HA Active/Active panic log analysis
 - **HA Peer Monitoring** — Probes standby edge at `169.254.2.2` for memory, CPU, core dumps
 - **Core Dump Tracking** — Detects and lists core dump files with timestamps
+- **Google Chat Notifications** — Sends webhook messages for new or escalated memory, diagnostic-check, and core-dump alerts
 - **Recording & Reports** — Record polling sessions at custom intervals, generate downloadable HTML reports with trend charts
 - **Shared Recording Support** — Multiple users can record different testbeds or bastions at the same time, with one active recording per target
 - **Pause/Resume Polling** — Toggle auto-polling on/off when the testbed is under heavy load
@@ -29,6 +30,9 @@ A real-time testbed verification dashboard for VeloCloud SD-WAN infrastructure. 
 ```bash
 # Install dependencies
 pip install -r requirements.txt
+
+# Optional: copy the sample environment file and edit it
+cp .env.example .env
 
 # Run the server
 python3 app.py
@@ -43,7 +47,9 @@ Use the included deployment helper on the production host after the repo has bee
 ```bash
 cd /path/to/testbuddy
 chmod +x deploy_prod.sh
-APP_USER=testbuddy APP_GROUP=testbuddy TESTBUDDY_HOST=0.0.0.0 TESTBUDDY_PORT=5001 ./deploy_prod.sh
+cp .env.example .env
+# edit .env as needed
+APP_USER=testbuddy APP_GROUP=testbuddy ./deploy_prod.sh
 ```
 
 What it does:
@@ -51,12 +57,26 @@ What it does:
 - Installs Python dependencies from `requirements.txt`
 - Creates `/etc/systemd/system/testbuddy.service`
 - Enables and restarts the service
+- Points the service at `.env` so config changes are picked up on restart
 
 Useful overrides:
 - `SERVICE_NAME` to change the systemd unit name
 - `APP_USER` / `APP_GROUP` to run the service as a specific account
 - `PYTHON_BIN` to choose a specific Python interpreter
-- `TESTBUDDY_HOST` / `TESTBUDDY_PORT` to control the bind address without editing `app.py`
+- `ENV_FILE` to use a dotenv file other than `.env`
+- `TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URL` or `TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URLS` to enable Google Chat alerts
+
+Example with Google Chat enabled:
+
+```bash
+cat > .env <<'EOF'
+TESTBUDDY_HOST=0.0.0.0
+TESTBUDDY_PORT=5001
+TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URL=https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=...
+EOF
+
+APP_USER=testbuddy APP_GROUP=testbuddy ./deploy_prod.sh
+```
 
 ## Requirements
 
@@ -107,6 +127,31 @@ Useful overrides:
 | `WARN_SLOPE_KB_H` / `CRIT_SLOPE_KB_H` | -200 / -800 | Memory leak rate thresholds |
 | `DB_RETENTION_HOURS` | 168 (7d) | Memory sample retention |
 | `CHECKS_RETENTION_HOURS` | 120 (5d) | Diagnostic check alert retention |
+
+### Dotenv support
+
+`app.py` automatically loads `.env` from the repo root before reading `TESTBUDDY_*` variables. Existing shell or systemd environment variables still win over values in `.env`.
+
+For production installs, `deploy_prod.sh` sets `TESTBUDDY_DOTENV_PATH` in the systemd unit, so editing `.env` and restarting the service is enough:
+
+```bash
+sudo systemctl restart testbuddy
+```
+
+### Google Chat alerting
+
+Set these in `.env` or in the process environment before starting `app.py`:
+
+- `TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URL` — single incoming-webhook URL
+- `TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URLS` — comma or whitespace separated webhook URLs
+- `TESTBUDDY_GOOGLE_CHAT_TIMEOUT` — webhook POST timeout in seconds, default `10`
+- `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES` — set to `1` to also post recovery messages when an alert clears
+
+Behavior:
+
+- Sends messages after each completed poll, not on every page load or API call
+- Posts only for new alerts, severity escalations, and core-dump file-list changes
+- Covers memory alerts, active diagnostic check alerts, and core-dump alerts
 
 ## API Reference
 
