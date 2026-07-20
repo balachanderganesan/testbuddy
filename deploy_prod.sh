@@ -9,13 +9,46 @@ APP_USER="${APP_USER:-$(id -un)}"
 APP_GROUP="${APP_GROUP:-$(id -gn)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-if [[ -f "$ENV_FILE" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$ENV_FILE"
-    set +a
-fi
+dotenv_get() {
+    local key="$1"
+    local file="$2"
+    local line value
 
+    [[ -f "$file" ]] || return 1
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+        [[ "$line" == export\ * ]] && line="${line#export }"
+        [[ "$line" == "$key="* ]] || continue
+        value="${line#*=}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        if [[ ${#value} -ge 2 ]]; then
+            if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+                value="${value:1:${#value}-2}"
+            elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+                value="${value:1:${#value}-2}"
+            fi
+        fi
+        printf '%s\n' "$value"
+        return 0
+    done < "$file"
+
+    return 1
+}
+
+systemd_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value// /\\x20}"
+    value="${value//$'\t'/\\x09}"
+    printf '%s' "$value"
+}
+
+TESTBUDDY_HOST="${TESTBUDDY_HOST:-$(dotenv_get TESTBUDDY_HOST "$ENV_FILE" 2>/dev/null || true)}"
+TESTBUDDY_PORT="${TESTBUDDY_PORT:-$(dotenv_get TESTBUDDY_PORT "$ENV_FILE" 2>/dev/null || true)}"
 TESTBUDDY_HOST="${TESTBUDDY_HOST:-0.0.0.0}"
 TESTBUDDY_PORT="${TESTBUDDY_PORT:-5001}"
 
@@ -79,6 +112,10 @@ fi
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TMP_UNIT="$(mktemp)"
 trap 'rm -f "$TMP_UNIT"' EXIT
+ESC_APP_DIR="$(systemd_escape "$APP_DIR")"
+ESC_ENV_FILE="$(systemd_escape "$ENV_FILE")"
+ESC_PYTHON="$(systemd_escape "$VENV_DIR/bin/python")"
+ESC_APP="$(systemd_escape "$APP_DIR/app.py")"
 
 cat >"$TMP_UNIT" <<EOF
 [Unit]
@@ -90,10 +127,10 @@ Wants=network-online.target
 Type=simple
 User=$APP_USER
 Group=$APP_GROUP
-WorkingDirectory="$APP_DIR"
 Environment="PYTHONUNBUFFERED=1"
-Environment="TESTBUDDY_DOTENV_PATH=$ENV_FILE"
-ExecStart="$VENV_DIR/bin/python" "$APP_DIR/app.py"
+Environment="TESTBUDDY_DOTENV_PATH=$ESC_ENV_FILE"
+WorkingDirectory=$ESC_APP_DIR
+ExecStart=$ESC_PYTHON $ESC_APP
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
