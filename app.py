@@ -310,6 +310,19 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_ans_scope_active
                 ON alert_notification_state(topology_id, hypervisor_id, active);
+
+            CREATE TABLE IF NOT EXISTS alert_subscriptions (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_key       TEXT    NOT NULL,
+                topology_id      TEXT    NOT NULL,
+                hypervisor_id    INTEGER,
+                subscriber_name  TEXT    NOT NULL,
+                chat_user_name   TEXT    NOT NULL,
+                created_at       TEXT    NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_subscriptions_target_chat
+                ON alert_subscriptions(target_key, chat_user_name);
         """)
         # Migrate existing DB: add new columns if absent
         _add_col_if_missing(conn, "recording_sessions", "poll_interval_sec INTEGER DEFAULT 300")
@@ -347,6 +360,11 @@ def init_db():
         _add_col_if_missing(conn, "alert_notification_state", "opened_at TEXT")
         _add_col_if_missing(conn, "alert_notification_state", "last_seen_at TEXT")
         _add_col_if_missing(conn, "alert_notification_state", "last_notified_at TEXT")
+        _add_col_if_missing(conn, "alert_subscriptions", "topology_id TEXT")
+        _add_col_if_missing(conn, "alert_subscriptions", "hypervisor_id INTEGER")
+        _add_col_if_missing(conn, "alert_subscriptions", "subscriber_name TEXT")
+        _add_col_if_missing(conn, "alert_subscriptions", "chat_user_name TEXT")
+        _add_col_if_missing(conn, "alert_subscriptions", "created_at TEXT")
         _add_col_if_missing(conn, "memory_samples", "core_files_json TEXT")
         _add_col_if_missing(conn, "memory_samples", "ha_core_files_json TEXT")
         for col in [
@@ -529,6 +547,68 @@ def _parse_poll_target(target):
         except ValueError:
             return None, None
     return None, None
+
+
+def _format_target_label(topology_id, hypervisor_name=None):
+    if topology_id == "standard_testbeds":
+        if hypervisor_name:
+            return f"Standard Testbeds - {hypervisor_name}"
+        return "All Standard Testbeds"
+    return TOPOLOGIES.get(topology_id, {}).get("label", topology_id)
+
+
+def _resolve_alert_target(conn, target_key):
+    kind, value = _parse_poll_target(target_key)
+    if kind == "topology":
+        return {
+            "target_key": value,
+            "topology_id": value,
+            "hypervisor_id": None,
+            "hypervisor_name": None,
+            "label": _format_target_label(value),
+        }
+    if kind == "bastion":
+        row = conn.execute("""
+            SELECT id, name, ip
+            FROM hypervisors
+            WHERE id=? AND topology_id='standard_testbeds'
+        """, (value,)).fetchone()
+        if not row:
+            return None
+        hypervisor_name = row["name"] or row["ip"] or f"Bastion {value}"
+        return {
+            "target_key": target_key,
+            "topology_id": "standard_testbeds",
+            "hypervisor_id": value,
+            "hypervisor_name": hypervisor_name,
+            "label": _format_target_label("standard_testbeds", hypervisor_name),
+        }
+    return None
+
+
+def _subscriptions_for_target(conn, target_key):
+    return [dict(r) for r in conn.execute("""
+        SELECT id, target_key, topology_id, hypervisor_id,
+               subscriber_name, chat_user_name, created_at
+        FROM alert_subscriptions
+        WHERE target_key=?
+        ORDER BY subscriber_name COLLATE NOCASE, chat_user_name
+    """, (target_key,)).fetchall()]
+
+
+def _subscriptions_for_scope(conn, topology_id, hypervisor_id=None):
+    target_key = (
+        f"{BASTION_TARGET_PREFIX}{hypervisor_id}"
+        if hypervisor_id is not None else topology_id
+    )
+    return _subscriptions_for_target(conn, target_key)
+
+
+def _scope_target_key(topology_id, hypervisor_id=None):
+    return (
+        f"{BASTION_TARGET_PREFIX}{hypervisor_id}"
+        if hypervisor_id is not None else topology_id
+    )
 
 
 @contextmanager
@@ -1983,10 +2063,9 @@ def _collect_active_alerts(topology_id, hypervisor_id=None, include_core=False):
         a.get("first_seen") or "",
         a.get("vm_name") or a["ip"],
     ))
-    scope_label = TOPOLOGIES.get(topology_id, {}).get("label", topology_id)
-    if hypervisor_name:
-        scope_label = f"{scope_label} / {hypervisor_name}"
+    scope_label = _format_target_label(topology_id, hypervisor_name)
     return alerts, {
+        "target_key": _scope_target_key(topology_id, hypervisor_id),
         "topology_id": topology_id,
         "hypervisor_id": hypervisor_id,
         "hypervisor_name": hypervisor_name,
@@ -2077,12 +2156,36 @@ def _recovered_alert_line(row):
     return prefix
 
 
-def _build_google_chat_message(scope, new_alerts, escalated_alerts, updated_alerts, recovered_rows):
+def _critical_clear_row_from_state(row):
+    return {
+        "device_id": row.get("device_id"),
+        "device_name": row.get("device_name"),
+        "device_ip": row.get("device_ip"),
+        "hypervisor_name": row.get("hypervisor_name"),
+        "alert_source": row.get("alert_source"),
+        "last_level": row.get("last_level"),
+    }
+
+
+def _format_google_chat_mentions(subscribers):
+    mentions = []
+    for sub in subscribers:
+        user_name = (sub.get("chat_user_name") or "").strip()
+        if not user_name:
+            continue
+        mentions.append(f"<{user_name}>")
+    return " ".join(mentions)
+
+
+def _build_google_chat_message(scope, subscribers, new_alerts, escalated_alerts, updated_alerts, recovered_rows):
     lines = [
         "TestBuddy alert update",
         f"Target: {scope['label']}",
         f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
     ]
+    mention_line = _format_google_chat_mentions(subscribers)
+    if mention_line:
+        lines.append(f"Notifying: {mention_line}")
 
     def _append_section(title, rows, formatter):
         if not rows:
@@ -2094,11 +2197,10 @@ def _build_google_chat_message(scope, new_alerts, escalated_alerts, updated_aler
         if len(rows) > 15:
             lines.append(f"- ... {len(rows) - 15} more")
 
-    _append_section("New alerts", new_alerts, _alert_line)
-    _append_section("Escalated alerts", escalated_alerts, _alert_line)
-    _append_section("Updated alerts", updated_alerts, _alert_line)
+    _append_section("New critical alerts", new_alerts, _alert_line)
+    _append_section("Escalated to critical", escalated_alerts, _alert_line)
     if GOOGLE_CHAT_NOTIFY_RECOVERIES:
-        _append_section("Recovered alerts", recovered_rows, _recovered_alert_line)
+        _append_section("Critical alerts cleared", recovered_rows, _recovered_alert_line)
 
     return "\n".join(lines)
 
@@ -2129,6 +2231,7 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
     current_by_key = {_alert_key(alert): alert for alert in alerts}
 
     with get_db() as conn:
+        subscribers = _subscriptions_for_scope(conn, topology_id, hypervisor_id)
         if hypervisor_id is None:
             existing_rows = [dict(r) for r in conn.execute("""
                 SELECT *
@@ -2146,6 +2249,7 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
         new_alerts = []
         escalated_alerts = []
         updated_alerts = []
+        recovered_rows = []
 
         for key, alert in current_by_key.items():
             prev = existing_by_key.get(key)
@@ -2153,12 +2257,20 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
             previous_level = prev["last_level"] if prev else "ok"
             event_type = None
 
-            if not prev or not prev.get("active"):
+            if alert["alert"] == "critical" and (not prev or not prev.get("active")):
                 event_type = "new"
-            elif ALERT_SEVERITY_RANK.get(alert["alert"], 0) > ALERT_SEVERITY_RANK.get(previous_level, 0):
+            elif (
+                alert["alert"] == "critical"
+                and ALERT_SEVERITY_RANK.get(previous_level, 0) < ALERT_SEVERITY_RANK["critical"]
+            ):
                 event_type = "escalated"
-            elif alert["alert_source"] == "core_dump" and fingerprint != (prev.get("last_fingerprint") or ""):
-                event_type = "updated"
+            elif (
+                prev and prev.get("active")
+                and prev.get("last_level") == "critical"
+                and alert["alert"] != "critical"
+                and GOOGLE_CHAT_NOTIFY_RECOVERIES
+            ):
+                recovered_rows.append(_critical_clear_row_from_state(prev))
 
             if event_type == "new":
                 new_alerts.append(alert)
@@ -2203,7 +2315,6 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
                     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, params)
 
-        recovered_rows = []
         for key, row in existing_by_key.items():
             if not row.get("active") or key in current_by_key:
                 continue
@@ -2212,14 +2323,15 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
                 SET active=0, last_seen_at=?
                 WHERE alert_key=?
             """, (now, key))
-            if GOOGLE_CHAT_NOTIFY_RECOVERIES:
-                recovered_rows.append(row)
+            if GOOGLE_CHAT_NOTIFY_RECOVERIES and row.get("last_level") == "critical":
+                recovered_rows.append(_critical_clear_row_from_state(row))
 
     if not any((new_alerts, escalated_alerts, updated_alerts, recovered_rows)):
         return
 
     message = _build_google_chat_message(
         scope,
+        subscribers,
         new_alerts,
         escalated_alerts,
         updated_alerts,
@@ -3516,6 +3628,73 @@ def api_topologies():
     })
 
 
+@app.route("/api/subscriptions")
+def api_subscriptions():
+    target_key = (request.args.get("target") or "").strip()
+    if not target_key:
+        return jsonify({"error": "target is required"}), 400
+    with get_db() as conn:
+        target = _resolve_alert_target(conn, target_key)
+        if not target:
+            return jsonify({"error": "invalid target"}), 400
+        rows = _subscriptions_for_target(conn, target["target_key"])
+    return jsonify(rows)
+
+
+@app.route("/api/subscriptions", methods=["POST"])
+def api_subscriptions_create():
+    data = request.get_json(force=True) or {}
+    target_key = (data.get("target") or "").strip()
+    subscriber_name = (data.get("subscriber_name") or "").strip()
+    chat_user_name = (data.get("chat_user_name") or "").strip()
+
+    if not target_key:
+        return jsonify({"error": "target is required"}), 400
+    if not subscriber_name:
+        return jsonify({"error": "subscriber_name is required"}), 400
+    if not chat_user_name:
+        return jsonify({"error": "chat_user_name is required"}), 400
+    if not chat_user_name.startswith("users/") or re.search(r"\s", chat_user_name):
+        return jsonify({"error": "chat_user_name must be a Google Chat user resource"}), 400
+
+    created_at = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        target = _resolve_alert_target(conn, target_key)
+        if not target:
+            return jsonify({"error": "invalid target"}), 400
+        cur = conn.execute("""
+            INSERT OR IGNORE INTO alert_subscriptions(
+                target_key, topology_id, hypervisor_id,
+                subscriber_name, chat_user_name, created_at
+            ) VALUES(?,?,?,?,?,?)
+        """, (
+            target["target_key"],
+            target["topology_id"],
+            target["hypervisor_id"],
+            subscriber_name,
+            chat_user_name,
+            created_at,
+        ))
+        if cur.rowcount == 0:
+            return jsonify({"error": "subscription already exists"}), 409
+        row = conn.execute("""
+            SELECT id, target_key, topology_id, hypervisor_id,
+                   subscriber_name, chat_user_name, created_at
+            FROM alert_subscriptions
+            WHERE id=?
+        """, (cur.lastrowid,)).fetchone()
+    return jsonify(dict(row)), 201
+
+
+@app.route("/api/subscriptions/<int:sub_id>", methods=["DELETE"])
+def api_subscriptions_delete(sub_id):
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM alert_subscriptions WHERE id=?", (sub_id,))
+        if cur.rowcount == 0:
+            return jsonify({"error": "not found"}), 404
+    return jsonify({"status": "deleted", "id": sub_id})
+
+
 @app.route("/api/status")
 def api_status():
     """Return current system status: threads, polling state, DB stats."""
@@ -3696,6 +3875,10 @@ def api_bastion_delete(hv_id):
             )
         """, (hv_id,))
         conn.execute("DELETE FROM devices WHERE hypervisor_id = ?", (hv_id,))
+        conn.execute(
+            "DELETE FROM alert_subscriptions WHERE target_key=?",
+            (f"{BASTION_TARGET_PREFIX}{hv_id}",),
+        )
         conn.execute(
             "DELETE FROM hypervisors WHERE id = ? AND topology_id = 'standard_testbeds'",
             (hv_id,))

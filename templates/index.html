@@ -140,6 +140,16 @@
     .report-filter-chip { border:1px solid #30363d; background:#21262d; color:#c9d1d9;
                           border-radius:999px; font-size:.68rem; padding:.18rem .55rem; }
     .report-filter-chip.active { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+    .subscriber-panel { border-left:1px solid #30363d; padding-left:.9rem; margin-left:.25rem; min-width:320px; }
+    .subscriber-list { display:flex; flex-wrap:wrap; gap:.4rem; }
+    .subscriber-chip { display:inline-flex; align-items:center; gap:.35rem; border:1px solid #30363d;
+                       background:#0d1117; border-radius:999px; padding:.18rem .55rem; font-size:.7rem; }
+    .subscriber-chip code { color:#8b949e; font-size:.68rem; margin:0; }
+    .subscriber-empty { color:#8b949e; font-size:.74rem; }
+    .subscriber-remove { border:0; background:transparent; color:#f85149; padding:0; line-height:1; }
+    .subscriber-remove:hover { color:#ff7b72; }
+    .subscriber-help { color:#8b949e; font-size:.68rem; line-height:1.35; max-width:520px; }
+    .subscriber-help code { color:#c9d1d9; font-size:.66rem; }
   </style>
 </head>
 <body>
@@ -278,6 +288,27 @@
       <option value="3600">1 hour</option>
     </select>
     <span style="font-size:.78rem;color:#8b949e" id="topoPollingLastPolled">Last poll: —</span>
+    <div class="subscriber-panel d-flex flex-column gap-2">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <span style="font-size:.78rem;color:#8b949e" id="subscriberTargetLabel">Subscribers:</span>
+        <span class="text-muted" style="font-size:.7rem">Exact target only</span>
+      </div>
+      <div id="subscriberList" class="subscriber-list">
+        <span class="subscriber-empty">No subscribers.</span>
+      </div>
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <input id="subscriberNameInput" class="form-control form-control-sm" style="max-width:140px" placeholder="Name">
+        <input id="subscriberChatInput" class="form-control form-control-sm" style="min-width:210px;max-width:280px" placeholder="Chat User ID (users/...)">
+        <button class="btn btn-sm btn-outline-primary" onclick="addSubscription()">
+          <i class="bi bi-bell me-1"></i>Subscribe
+        </button>
+      </div>
+      <div class="subscriber-help">
+        Enter a Google Chat user resource such as <code>users/123456789012345678901</code>.
+        Email addresses will not work here. To get it, open the user in Google Chat and copy the
+        user resource ID from the Chat API or admin tooling your team already uses.
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1912,6 +1943,7 @@ function updatePollStatus(paused) {
 }
 
 let _topoPollingCache = {};  // cached per-target config (topology or bastion)
+let _activeSubscriptions = [];
 
 async function checkPollStatus() {
   try {
@@ -1941,6 +1973,52 @@ function _getActivePollingTargetLabel() {
   }
   return document.querySelector(`.std-bastion-pill[data-hv-id="${currentBastionId}"]`)?.dataset.hvName
     || `Bastion ${currentBastionId}`;
+}
+
+function renderSubscriptions(errorMessage="") {
+  const list = document.getElementById("subscriberList");
+  const label = document.getElementById("subscriberTargetLabel");
+  label.textContent = `Subscribers: ${_getActivePollingTargetLabel()}`;
+  if (errorMessage) {
+    list.innerHTML = `<span class="subscriber-empty" style="color:#f85149">${escapeHtml(errorMessage)}</span>`;
+    return;
+  }
+  if (!_activeSubscriptions.length) {
+    list.innerHTML = '<span class="subscriber-empty">No subscribers.</span>';
+    return;
+  }
+  list.innerHTML = _activeSubscriptions.map(sub => `
+    <span class="subscriber-chip">
+      <strong>${escapeHtml(sub.subscriber_name)}</strong>
+      <code>${escapeHtml(sub.chat_user_name)}</code>
+      <button class="subscriber-remove" title="Remove subscriber"
+              onclick="removeSubscription(${sub.id})">✕</button>
+    </span>
+  `).join("");
+}
+
+async function loadSubscriptions() {
+  const reportsVisible = document.getElementById("reportsPanel").style.display !== "none";
+  const statusVisible = document.getElementById("statusPanel").style.display !== "none";
+  const supported = currentTopology === "chennai"
+    || currentTopology === "standard_testbeds"
+    || currentTopology.startsWith("sc_tb");
+  if (reportsVisible || statusVisible || !supported) {
+    _activeSubscriptions = [];
+    renderSubscriptions();
+    return;
+  }
+  const target = _getActivePollingTargetId();
+  try {
+    const r = await fetch(`/api/subscriptions?target=${encodeURIComponent(target)}`);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+    _activeSubscriptions = d;
+    renderSubscriptions();
+  } catch (err) {
+    _activeSubscriptions = [];
+    renderSubscriptions(`Unable to load subscribers: ${err.message || err}`);
+  }
 }
 
 function _getEffectivePollingConfig() {
@@ -2050,6 +2128,50 @@ async function changeTopoInterval() {
     toast(`${label}: poll interval set to ${interval}s`);
   } catch (err) {
     toast(`Polling interval update failed: ${err.message || err}`, "error");
+  }
+}
+
+async function addSubscription() {
+  const subscriberName = document.getElementById("subscriberNameInput").value.trim();
+  const chatUserName = document.getElementById("subscriberChatInput").value.trim();
+  if (!subscriberName) {
+    toast("Subscriber name is required", "warn");
+    return;
+  }
+  if (!chatUserName.startsWith("users/") || /\s/.test(chatUserName)) {
+    toast("Chat User ID must look like users/123...", "warn");
+    return;
+  }
+  try {
+    const r = await fetch("/api/subscriptions", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        target: _getActivePollingTargetId(),
+        subscriber_name: subscriberName,
+        chat_user_name: chatUserName,
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+    document.getElementById("subscriberNameInput").value = "";
+    document.getElementById("subscriberChatInput").value = "";
+    await loadSubscriptions();
+    toast(`Subscribed ${subscriberName}`);
+  } catch (err) {
+    toast(`Subscribe failed: ${err.message || err}`, "error");
+  }
+}
+
+async function removeSubscription(subId) {
+  try {
+    const r = await fetch(`/api/subscriptions/${subId}`, {method: "DELETE"});
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+    await loadSubscriptions();
+    toast("Subscriber removed");
+  } catch (err) {
+    toast(`Remove failed: ${err.message || err}`, "error");
   }
 }
 
@@ -3064,7 +3186,7 @@ async function loadStatus() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis(), checkPollStatus()]);
+  await Promise.all([loadSummary(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis(), checkPollStatus(), loadSubscriptions()]);
   checkRecordingStatus();
   updateTopoPollingBar();
   // Refresh active-recordings section if Reports tab is visible

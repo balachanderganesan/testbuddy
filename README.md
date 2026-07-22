@@ -19,6 +19,7 @@ A real-time testbed verification dashboard for VeloCloud SD-WAN infrastructure. 
 - **HA Peer Monitoring** — Probes standby edge at `169.254.2.2` for memory, CPU, core dumps
 - **Core Dump Tracking** — Detects and lists core dump files with timestamps
 - **Google Chat Notifications** — Sends webhook messages for new or escalated memory, diagnostic-check, and core-dump alerts
+- **Per-Target Subscribers** — Lets users subscribe the active topology or bastion so Google Chat alerts tag the exact target’s subscribers
 - **Recording & Reports** — Record polling sessions at custom intervals, generate downloadable HTML reports with trend charts
 - **Shared Recording Support** — Multiple users can record different testbeds or bastions at the same time, with one active recording per target
 - **Pause/Resume Polling** — Toggle auto-polling on/off when the testbed is under heavy load
@@ -150,8 +151,17 @@ Set these in `.env` or in the process environment before starting `app.py`:
 Behavior:
 
 - Sends messages after each completed poll, not on every page load or API call
-- Posts only for new alerts, severity escalations, and core-dump file-list changes
-- Covers memory alerts, active diagnostic check alerts, and core-dump alerts
+- Posts only when an alert enters `critical`
+- Optionally posts when a previously critical alert clears if `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES=1`
+- Warning-only alerts and warning-only state changes never send Google Chat messages
+- Covers memory alerts, active diagnostic check alerts, and core-dump alerts when they are critical
+
+Subscriber behavior:
+
+- The dashboard has a self-service subscriber panel for the currently selected topology or Standard Testbeds bastion
+- Subscriptions are exact-target only: `standard_testbeds` does not inherit to bastions, and bastion subscriptions do not inherit upward
+- Subscribers must be entered as Google Chat user resource names such as `users/123456789012345678901`
+- Subscription management is open to anyone who can access the dashboard; there is no additional auth layer in v1
 
 ## API Reference
 
@@ -167,6 +177,13 @@ Behavior:
 | `/api/poll_now` | POST | Trigger immediate poll |
 | `/api/polling/status` | GET | Auto-polling state (paused/live) |
 | `/api/polling/toggle` | POST | Pause or resume auto-polling |
+
+### Subscriptions
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/subscriptions?target=<target_key>` | GET | List exact-target subscribers for a topology or bastion |
+| `/api/subscriptions` | POST | Add a subscriber with `target`, `subscriber_name`, and `chat_user_name` |
+| `/api/subscriptions/<id>` | DELETE | Remove one subscriber entry |
 
 ### Diagnostic Checks
 | Endpoint | Method | Description |
@@ -210,6 +227,7 @@ SQLite with WAL mode. Schema auto-migrates via `_add_col_if_missing()`.
 | `devices` | Discovered VMs (edges/gateways) |
 | `memory_samples` | Per-poll memory/CPU/core metrics |
 | `device_checks` | Diagnostic check results and alerts |
+| `alert_subscriptions` | Per-target Google Chat subscribers |
 | `recording_sessions` | Recording session metadata |
 
 ## Project Structure
