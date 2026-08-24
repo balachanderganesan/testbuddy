@@ -1875,7 +1875,10 @@ CHECK_ALERT_LABELS = {
     "ha_panic": "HA Active/Active Panic",
     "core_dump": "Core Dump",
     "memory": "Memory",
+    "offline": "Offline",
 }
+
+GOOGLE_CHAT_ALERT_SOURCES = {"core_dump", "offline", "ha_panic", "dpdk_leak", "health"}
 
 
 def _epoch_to_iso(ts):
@@ -2073,6 +2076,35 @@ def _collect_active_alerts(topology_id, hypervisor_id=None, include_core=False):
     }
 
 
+def _collect_offline_notification_alerts(topology_id, hypervisor_id=None):
+    with get_db() as conn:
+        devices = _load_scope_devices(conn, topology_id, hypervisor_id)
+
+    alerts = []
+    for dev in devices:
+        if dev.get("reachable"):
+            continue
+        last_seen = dev.get("last_seen")
+        detail = f"Device unreachable; last seen {last_seen}" if last_seen else "Device unreachable; no successful poll yet"
+        alerts.append({
+            "device_id": dev["id"],
+            "device_type": dev["device_type"],
+            "ip": dev["ip"],
+            "vm_name": dev.get("vm_name") or dev["ip"],
+            "hypervisor_id": dev["hypervisor_id"],
+            "hypervisor": dev["hypervisor_name"],
+            "alert": "critical",
+            "alert_source": "offline",
+            "alert_detail": detail,
+            "first_seen": last_seen,
+            "ts": datetime.utcnow().isoformat(),
+            "slope_kb_h": None,
+            "current": None,
+            "ha": None,
+        })
+    return alerts
+
+
 def _alert_key(alert):
     return f"{alert['device_id']}:{alert['alert_source']}"
 
@@ -2227,8 +2259,19 @@ def _send_google_chat_message(text):
 
 def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
     alerts, scope = _collect_active_alerts(topology_id, hypervisor_id, include_core=True)
+    alerts.extend(_collect_offline_notification_alerts(topology_id, hypervisor_id))
     now = datetime.utcnow().isoformat()
-    current_by_key = {_alert_key(alert): alert for alert in alerts}
+    all_current_by_key = {
+        _alert_key(alert): alert
+        for alert in alerts
+        if alert.get("alert_source") in GOOGLE_CHAT_ALERT_SOURCES
+    }
+    current_by_key = {
+        key: alert
+        for key, alert in all_current_by_key.items()
+        if alert.get("alert") == "critical"
+    }
+    noncritical_current_keys = set(all_current_by_key) - set(current_by_key)
 
     with get_db() as conn:
         subscribers = _subscriptions_for_scope(conn, topology_id, hypervisor_id)
@@ -2264,13 +2307,6 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
                 and ALERT_SEVERITY_RANK.get(previous_level, 0) < ALERT_SEVERITY_RANK["critical"]
             ):
                 event_type = "escalated"
-            elif (
-                prev and prev.get("active")
-                and prev.get("last_level") == "critical"
-                and alert["alert"] != "critical"
-                and GOOGLE_CHAT_NOTIFY_RECOVERIES
-            ):
-                recovered_rows.append(_critical_clear_row_from_state(prev))
 
             if event_type == "new":
                 new_alerts.append(alert)
@@ -2323,7 +2359,12 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
                 SET active=0, last_seen_at=?
                 WHERE alert_key=?
             """, (now, key))
-            if GOOGLE_CHAT_NOTIFY_RECOVERIES and row.get("last_level") == "critical":
+            if (
+                GOOGLE_CHAT_NOTIFY_RECOVERIES
+                and row.get("alert_source") in GOOGLE_CHAT_ALERT_SOURCES
+                and row.get("last_level") == "critical"
+                and key not in noncritical_current_keys
+            ):
                 recovered_rows.append(_critical_clear_row_from_state(row))
 
     if not any((new_alerts, escalated_alerts, updated_alerts, recovered_rows)):
