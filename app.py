@@ -160,6 +160,7 @@ GOOGLE_CHAT_NOTIFY_RECOVERIES = _env_flag(
     "TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES",
     default=False,
 )
+DPDK_LEAK_NOTIFICATION_DELAY = timedelta(hours=1)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -2140,6 +2141,22 @@ def _alert_fingerprint(alert):
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _alert_notification_ready(alert, now_dt):
+    if alert.get("alert_source") != "dpdk_leak":
+        return True
+
+    first_seen = alert.get("first_seen")
+    if not first_seen:
+        return False
+
+    try:
+        first_seen_dt = _parse_ts(first_seen)
+    except (TypeError, ValueError):
+        return False
+
+    return now_dt - first_seen_dt >= DPDK_LEAK_NOTIFICATION_DELAY
+
+
 def _fmt_kb_as_mb(kb_value):
     try:
         return f"{int(kb_value) / 1024:.1f} MB"
@@ -2260,7 +2277,8 @@ def _send_google_chat_message(text):
 def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
     alerts, scope = _collect_active_alerts(topology_id, hypervisor_id, include_core=True)
     alerts.extend(_collect_offline_notification_alerts(topology_id, hypervisor_id))
-    now = datetime.utcnow().isoformat()
+    now_dt = datetime.utcnow()
+    now = now_dt.isoformat()
     all_current_by_key = {
         _alert_key(alert): alert
         for alert in alerts
@@ -2269,7 +2287,7 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
     current_by_key = {
         key: alert
         for key, alert in all_current_by_key.items()
-        if alert.get("alert") == "critical"
+        if alert.get("alert") == "critical" and _alert_notification_ready(alert, now_dt)
     }
     noncritical_current_keys = set(all_current_by_key) - set(current_by_key)
 

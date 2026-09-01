@@ -152,6 +152,7 @@ Behavior:
 
 - Sends messages after each completed poll, not on every page load or API call
 - Posts only when an alert enters `critical`
+- DPDK leak notifications are delayed until the current non-zero leak streak has lasted at least 1 hour
 - Optionally posts when a previously critical alert clears if `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES=1`
 - Warning-only alerts and warning-only state changes never send Google Chat messages
 - Covers memory alerts, active diagnostic check alerts, and core-dump alerts when they are critical
