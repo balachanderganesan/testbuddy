@@ -607,6 +607,7 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const POLL_INTERVAL  = {{ poll_interval }} * 1000;
+const MEMTOP_MIN_INTERVAL_SEC = {{ memtop_min_interval_sec }};
 const WARN_FREE_PCT  = {{ warn_free_pct }};
 const CRIT_FREE_PCT  = {{ crit_free_pct }};
 
@@ -1435,11 +1436,19 @@ function renderCheckResult(type, result) {
       return `<div style="font-size:.72rem">${items.join(' &middot; ') || '—'}</div>`;
     }
     if (type === 'memory_top10') {
+      const notice = `<div class="mb-2" style="font-size:.68rem;color:#8b949e;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.4rem .55rem">
+        <i class="bi bi-info-circle me-1" style="color:#58a6ff"></i>
+        <code>debug.py --memory_dump</code> is resource-intensive. In regular polling this check runs at most every
+        <strong>${MEMTOP_MIN_INTERVAL_SEC}s</strong> (or your configured poll interval if longer).
+        During recordings it follows the recording sample interval.
+      </div>`;
       const rows = (Array.isArray(result) ? result : []).map(e =>
         `<tr><td>${e.name||'—'}</td><td>${e.bytes != null ? (e.bytes/1024/1024).toFixed(1)+' MB' : '—'}</td><td>${e.count??'—'}</td></tr>`
       ).join('');
-      if (!rows) return '';
-      return `<table class="table table-sm table-borderless mb-0" style="font-size:.7rem">
+      if (!rows) {
+        return notice + `<div style="font-size:.72rem;color:#6e7681">No allocator data in the latest sample.</div>`;
+      }
+      return notice + `<table class="table table-sm table-borderless mb-0" style="font-size:.7rem">
         <thead><tr><th>Allocator</th><th>Size</th><th>Count</th></tr></thead>
         <tbody>${rows}</tbody></table>`;
     }

@@ -39,6 +39,7 @@ DB_PATH      = str(BASE_DIR / "vcmem.db")
 DOTENV_PATH  = Path(os.getenv("TESTBUDDY_DOTENV_PATH", str(BASE_DIR / ".env")))
 
 POLL_INTERVAL        = 900    # seconds between polls (15 min)
+MEMTOP_MIN_INTERVAL_SEC = 300 # memory_dump is expensive; regular polls never run it more often
 SSH_TIMEOUT          = 15     # SSH connect + exec timeout (seconds)
 HA_SSH_TIMEOUT       = 8      # timeout for each SSH hop to 169.254.2.2
 DB_RETENTION_HOURS   = 168    # keep 7 days of samples
@@ -1140,45 +1141,49 @@ CHECKS_SSH_TIMEOUT = 120  # headroom for debug.py --timeout 60 commands
 POLL_DEVICE_TIMEOUT = CHECKS_SSH_TIMEOUT + SSH_TIMEOUT + HA_SSH_TIMEOUT + 15
 
 
-def _checks_cmd():
+def _checks_cmd(include_memtop=True):
     """
     Shell command that runs all diagnostic checks in a single SSH exec.
     Each section is delimited by VCCHECK_<TYPE>_BEGIN / VCCHECK_<TYPE>_END.
     The --psummary output is shared by tunnel and path checks (run once).
     """
-    return (
+    parts = [
         "printf 'VCCHECK_PSUMMARY_BEGIN\\n'; "
         "/opt/vc/bin/debug.py -v --psummary 2>/dev/null || echo '[]'; "
-        "printf '\\nVCCHECK_PSUMMARY_END\\n'; "
+        "printf '\\nVCCHECK_PSUMMARY_END\\n'; ",
 
         "printf 'VCCHECK_ROUTE_BEGIN\\n'; "
         "/opt/vc/bin/debug.py --timeout 60 --rsummary 2>/dev/null || echo '[]'; "
-        "printf '\\nVCCHECK_ROUTE_END\\n'; "
+        "printf '\\nVCCHECK_ROUTE_END\\n'; ",
 
         "printf 'VCCHECK_STALE_PI_BEGIN\\n'; "
         "/opt/vc/bin/debug.py --timeout 60 -v --stale_pi_dump 2>/dev/null || echo '[]'; "
-        "printf '\\nVCCHECK_STALE_PI_END\\n'; "
+        "printf '\\nVCCHECK_STALE_PI_END\\n'; ",
 
         "printf 'VCCHECK_STALE_TD_BEGIN\\n'; "
         "/opt/vc/bin/debug.py --timeout 60 -v --stale_td_dump 2>/dev/null || echo '[]'; "
-        "printf '\\nVCCHECK_STALE_TD_END\\n'; "
+        "printf '\\nVCCHECK_STALE_TD_END\\n'; ",
 
         "printf 'VCCHECK_HEALTH_BEGIN\\n'; "
         "/opt/vc/bin/debug.py -v --health_report 2>/dev/null || echo '{}'; "
-        "printf '\\nVCCHECK_HEALTH_END\\n'; "
-
-        "printf 'VCCHECK_MEMTOP_BEGIN\\n'; "
-        "/opt/vc/bin/debug.py -v --memory_dump 2>/dev/null || echo '[]'; "
-        "printf '\\nVCCHECK_MEMTOP_END\\n'; "
-
+        "printf '\\nVCCHECK_HEALTH_END\\n'; ",
+    ]
+    if include_memtop:
+        parts.append(
+            "printf 'VCCHECK_MEMTOP_BEGIN\\n'; "
+            "/opt/vc/bin/debug.py -v --memory_dump 2>/dev/null || echo '[]'; "
+            "printf '\\nVCCHECK_MEMTOP_END\\n'; "
+        )
+    parts.extend([
         "printf 'VCCHECK_DPDK_BEGIN\\n'; "
         "/opt/vc/bin/vcdbgdump -r dpdk-leak-dump 2>/dev/null || echo ''; "
-        "printf '\\nVCCHECK_DPDK_END\\n'; "
+        "printf '\\nVCCHECK_DPDK_END\\n'; ",
 
         "printf 'VCCHECK_HA_PANIC_BEGIN\\n'; "
         "grep 'PANIC.*ACTIVE/ACTIVE' /var/log/edged.log 2>/dev/null | tail -20 || echo ''; "
-        "printf '\\nVCCHECK_HA_PANIC_END\\n'"
-    )
+        "printf '\\nVCCHECK_HA_PANIC_END\\n'",
+    ])
+    return "".join(parts)
 
 
 def _extract_check_block(raw, name):
@@ -1434,7 +1439,7 @@ def _parse_ha_panic_check(block, device):
     }
 
 
-def _parse_checks(raw, device):
+def _parse_checks(raw, device, include_memtop=True):
     """
     Parse all diagnostic check blocks from the combined SSH output.
     Each parser is independent — if one fails, the others still succeed.
@@ -1452,10 +1457,13 @@ def _parse_checks(raw, device):
         ("stale_pi",    lambda: _parse_stale_check(_extract_check_block(raw, "STALE_PI"), device, "stale_pi")),
         ("stale_td",    lambda: _parse_stale_check(_extract_check_block(raw, "STALE_TD"), device, "stale_td")),
         ("health",      lambda: _parse_health_check(_extract_check_block(raw, "HEALTH"), device)),
-        ("memory_top10", lambda: _parse_memtop_check(_extract_check_block(raw, "MEMTOP"), device)),
         ("dpdk_leak",   lambda: _parse_dpdk_check(_extract_check_block(raw, "DPDK"), device)),
         ("ha_panic",    lambda: _parse_ha_panic_check(_extract_check_block(raw, "HA_PANIC"), device)),
     ]
+    if include_memtop:
+        checks.append(
+            ("memory_top10", lambda: _parse_memtop_check(_extract_check_block(raw, "MEMTOP"), device)),
+        )
     for name, parse_fn in checks:
         try:
             result = parse_fn()
@@ -1468,7 +1476,52 @@ def _parse_checks(raw, device):
 
 # ── Polling ───────────────────────────────────────────────────────────────────
 
-def poll_device(device):
+def _get_device_poll_interval(device):
+    """Return configured poll interval (seconds) for a device's topology/bastion."""
+    tid = device.get("topology_id")
+    hv_id = device.get("hypervisor_id")
+    with _poll_cfg_lock:
+        if tid == "standard_testbeds":
+            cfg = _bastion_config.get(hv_id, _new_poll_config())
+        else:
+            cfg = _topo_config.get(tid, _new_poll_config())
+    return cfg.get("poll_interval", POLL_INTERVAL)
+
+
+def _fetch_last_memtop_times(conn, device_ids):
+    """Return {device_id: last_memory_top10_ts} for the given devices."""
+    if not device_ids:
+        return {}
+    ph = ",".join("?" * len(device_ids))
+    rows = conn.execute(f"""
+        SELECT device_id, MAX(ts) AS last_memtop_at
+        FROM device_checks
+        WHERE check_type='memory_top10' AND device_id IN ({ph})
+        GROUP BY device_id
+    """, device_ids).fetchall()
+    return {row["device_id"]: row["last_memtop_at"] for row in rows}
+
+
+def _should_poll_memtop(device, poll_interval_sec, recording=False):
+    """
+    Decide whether to run the expensive --memory_dump check this poll.
+    Recording sessions use the session interval; regular polling never runs
+    memtop more often than max(MEMTOP_MIN_INTERVAL_SEC, poll_interval).
+    """
+    if recording:
+        return True
+    interval = max(MEMTOP_MIN_INTERVAL_SEC, poll_interval_sec or POLL_INTERVAL)
+    last = device.get("last_memtop_at")
+    if not last:
+        return True
+    try:
+        elapsed = (datetime.utcnow() - datetime.strptime(last[:19], "%Y-%m-%dT%H:%M:%S")).total_seconds()
+    except (TypeError, ValueError):
+        return True
+    return elapsed >= interval
+
+
+def poll_device(device, recording=False, poll_interval_sec=None):
     """
     SSH into a VM via its hypervisor's NAT (hypervisor_ip:console_port),
     collect memory/CPU/core metrics, optionally collect HA peer metrics.
@@ -1496,9 +1549,12 @@ def poll_device(device):
 
         # Diagnostic checks (tunnel, route, path, stale flows, health, mem top10, dpdk)
         checks = []
+        if poll_interval_sec is None:
+            poll_interval_sec = _get_device_poll_interval(device)
+        include_memtop = _should_poll_memtop(device, poll_interval_sec, recording=recording)
         try:
-            checks_raw = ssh_run(ssh, _checks_cmd(), timeout=CHECKS_SSH_TIMEOUT)
-            checks = _parse_checks(checks_raw, device)
+            checks_raw = ssh_run(ssh, _checks_cmd(include_memtop=include_memtop), timeout=CHECKS_SSH_TIMEOUT)
+            checks = _parse_checks(checks_raw, device, include_memtop=include_memtop)
         except Exception as exc:
             log.debug(f"  checks {device['ip']}: {exc}")
 
@@ -1640,6 +1696,9 @@ def _run_poll(poll_targets=None):
                 return
             q += " AND (" + " OR ".join(clauses) + ")"
         devices = [dict(r) for r in conn.execute(q, params).fetchall()]
+        memtop_times = _fetch_last_memtop_times(conn, [d["id"] for d in devices])
+        for dev in devices:
+            dev["last_memtop_at"] = memtop_times.get(dev["id"])
 
     if not devices:
         log.info("No devices in DB yet — waiting for discovery")
@@ -1663,7 +1722,7 @@ def _run_poll(poll_targets=None):
     def _tracked_poll(dev):
         poll_starts[dev["id"]] = time.monotonic()
         try:
-            poll_device(dev)
+            poll_device(dev, recording=False, poll_interval_sec=_get_device_poll_interval(dev))
         finally:
             _release_poll_device(dev["id"])
 
@@ -3038,10 +3097,11 @@ def _poll_recording_devices(session: dict):
     if not devices:
         return
 
-    log.info(f"[REC {sid}] Polling {len(devices)} devices (interval={session['poll_interval_sec']}s)")
+    rec_interval = session.get("poll_interval_sec") or POLL_INTERVAL
+    log.info(f"[REC {sid}] Polling {len(devices)} devices (interval={rec_interval}s)")
     with ThreadPoolExecutor(max_workers=min(len(devices), POLL_WORKERS)) as pool:
         for d in devices:
-            pool.submit(poll_device, d)
+            pool.submit(poll_device, d, recording=True, poll_interval_sec=rec_interval)
 
     # Update last_polled_at timestamp in DB
     now = datetime.utcnow().isoformat()
@@ -3148,6 +3208,7 @@ def background_loop():
 def index():
     return render_template("index.html",
                            poll_interval=POLL_INTERVAL,
+                           memtop_min_interval_sec=MEMTOP_MIN_INTERVAL_SEC,
                            warn_free_pct=WARN_FREE_PCT,
                            crit_free_pct=CRIT_FREE_PCT)
 
