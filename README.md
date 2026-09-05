@@ -73,6 +73,7 @@ Example with Google Chat enabled:
 cat > .env <<'EOF'
 TESTBUDDY_HOST=0.0.0.0
 TESTBUDDY_PORT=5001
+TESTBUDDY_PUBLIC_URL=http://testbuddy.example.com:5001
 TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URL=https://chat.googleapis.com/v1/spaces/.../messages?key=...&token=...
 EOF
 
@@ -147,10 +148,12 @@ Set these in `.env` or in the process environment before starting `app.py`:
 - `TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URLS` — comma or whitespace separated webhook URLs
 - `TESTBUDDY_GOOGLE_CHAT_TIMEOUT` — webhook POST timeout in seconds, default `10`
 - `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES` — set to `1` to also post recovery messages when an alert clears
+- `TESTBUDDY_PUBLIC_URL` — dashboard origin used in alert links, for example `http://testbuddy.example.com:5001`
 
 Behavior:
 
 - Sends messages after each completed poll, not on every page load or API call
+- Includes a dashboard link that opens the alerting topology or Standard Testbeds bastion
 - Posts only when an alert enters `critical`
 - DPDK leak notifications are delayed until the current non-zero leak streak has lasted at least 1 hour
 - Optionally posts when a previously critical alert clears if `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES=1`

@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from pathlib import Path
-from urllib import error as urllib_error, request as urllib_request
+from urllib import error as urllib_error, parse as urllib_parse, request as urllib_request
 
 import paramiko
 from flask import Flask, jsonify, render_template, request, Response, stream_with_context
@@ -162,6 +162,70 @@ GOOGLE_CHAT_NOTIFY_RECOVERIES = _env_flag(
     default=False,
 )
 DPDK_LEAK_NOTIFICATION_DELAY = timedelta(hours=1)
+_WILDCARD_BIND_HOSTS = {"0.0.0.0", "::", "[::]", ""}
+_SC_TOPOLOGY_IDS = {tid for tid in TOPOLOGIES if tid.startswith("sc_")}
+_detected_public_base_url = None
+
+
+def _configured_public_base_url():
+    raw = (os.getenv("TESTBUDDY_PUBLIC_URL") or "").strip().rstrip("/")
+    if raw:
+        return raw
+    host = (os.getenv("TESTBUDDY_HOST") or "0.0.0.0").strip()
+    port = (os.getenv("TESTBUDDY_PORT") or "5001").strip() or "5001"
+    if host in _WILDCARD_BIND_HOSTS:
+        host = "localhost"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
+
+
+PUBLIC_BASE_URL = _configured_public_base_url()
+
+
+def _public_base_url():
+    raw = (os.getenv("TESTBUDDY_PUBLIC_URL") or "").strip().rstrip("/")
+    if raw:
+        return raw
+    if _detected_public_base_url:
+        return _detected_public_base_url
+    return PUBLIC_BASE_URL
+
+
+def _is_local_url(url):
+    lowered = (url or "").lower()
+    return any(token in lowered for token in ("localhost", "127.0.0.1", "[::1]"))
+
+
+def _capture_public_base_url():
+    """Remember a reachable dashboard origin from incoming browser requests."""
+    global _detected_public_base_url
+    if (os.getenv("TESTBUDDY_PUBLIC_URL") or "").strip():
+        return
+    try:
+        root = (request.url_root or "").strip().rstrip("/")
+    except RuntimeError:
+        return
+    if not root:
+        return
+    if _detected_public_base_url is None or (
+        _is_local_url(_detected_public_base_url) and not _is_local_url(root)
+    ):
+        _detected_public_base_url = root
+
+
+def _dashboard_url_for_scope(scope):
+    topology_id = scope.get("topology_id") or "chennai"
+    hypervisor_id = scope.get("hypervisor_id")
+    if topology_id == "standard_testbeds":
+        params = {"view": "standard"}
+        if hypervisor_id is not None:
+            params["bastion"] = str(hypervisor_id)
+    elif topology_id in _SC_TOPOLOGY_IDS:
+        params = {"view": "sc", "topology": topology_id}
+    else:
+        params = {"view": topology_id}
+    return f"{_public_base_url()}/?{urllib_parse.urlencode(params)}"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -187,6 +251,11 @@ _active_poll_lock = threading.Lock()
 _active_poll_devices = set()
 
 app = Flask(__name__)
+
+
+@app.before_request
+def _remember_public_base_url():
+    _capture_public_base_url()
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -2286,9 +2355,11 @@ def _format_google_chat_mentions(subscribers):
 
 
 def _build_google_chat_message(scope, subscribers, new_alerts, escalated_alerts, updated_alerts, recovered_rows):
+    dashboard_url = _dashboard_url_for_scope(scope)
     lines = [
         "TestBuddy alert update",
         f"Target: {scope['label']}",
+        f"Open in TestBuddy: {dashboard_url}",
         f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
     ]
     mention_line = _format_google_chat_mentions(subscribers)
@@ -3849,6 +3920,7 @@ def api_status():
                 "configured": bool(GOOGLE_CHAT_WEBHOOKS),
                 "webhook_count": len(GOOGLE_CHAT_WEBHOOKS),
                 "notify_recoveries": GOOGLE_CHAT_NOTIFY_RECOVERIES,
+                "dashboard_base_url": _public_base_url(),
             },
         },
         "db": {
@@ -4330,10 +4402,11 @@ if __name__ == "__main__":
     init_db()
     if GOOGLE_CHAT_WEBHOOKS:
         log.info(
-            "Google Chat notifications enabled (%d webhook%s, recoveries=%s)",
+            "Google Chat notifications enabled (%d webhook%s, recoveries=%s, dashboard=%s)",
             len(GOOGLE_CHAT_WEBHOOKS),
             "" if len(GOOGLE_CHAT_WEBHOOKS) == 1 else "s",
             "on" if GOOGLE_CHAT_NOTIFY_RECOVERIES else "off",
+            _public_base_url(),
         )
     log.info("Starting background collector...")
     threading.Thread(target=background_loop, daemon=True).start()
