@@ -1250,6 +1250,26 @@ const CHECK_LABELS = {
   ha_panic:'HA Active/Active Panic'
 };
 
+const CHECK_TOOLTIPS = {
+  tunnel:      '/opt/vc/bin/debug.py -v --psummary — stable/unstable/dead tunnel counts per peer type',
+  path:        '/opt/vc/bin/debug.py -v --psummary — peer_count and total_paths (same run as tunnel)',
+  route:       '/opt/vc/bin/debug.py --timeout 60 --rsummary — total route count per segment',
+  stale_pi:    '/opt/vc/bin/debug.py --timeout 60 -v --stale_pi_dump — stale path-info flows',
+  stale_td:    '/opt/vc/bin/debug.py --timeout 60 -v --stale_td_dump — stale tunnel-descriptor flows',
+  health:      '/opt/vc/bin/debug.py -v --health_report — CPU, memory %, handoff queue drops',
+  memory_top10:'/opt/vc/bin/debug.py -v --memory_dump — top allocators by bytes (throttled to ≥300s in regular polling)',
+  dpdk_leak:   '/opt/vc/bin/vcdbgdump -r dpdk-leak-dump — counts dpdk_mbuf_leak occurrences',
+  ha_panic:    "grep 'PANIC.*ACTIVE/ACTIVE' /var/log/edged.log | tail -20 — HA Active/Active panic lines",
+};
+
+function renderCheckCardTitle(type, label) {
+  const tip = CHECK_TOOLTIPS[type];
+  if (!tip) return `<strong style="font-size:.78rem">${label}</strong>`;
+  return `<strong style="font-size:.78rem">${label}
+    <i class="bi bi-terminal ms-1" style="font-size:.68rem;color:#6e7681;cursor:help"
+       title="${tip.replace(/"/g, '&quot;')}"></i></strong>`;
+}
+
 let _checkAlertsData = [];  // cached for dismiss operations
 
 function renderAlertSince(c) {
@@ -1687,7 +1707,7 @@ async function loadDeviceChecks(deviceId, hours) {
       return `<div class="col-12 col-md-6">
         <div style="background:#1c2128;border:1px solid #30363d;border-radius:8px;padding:.6rem .8rem;">
           <div class="d-flex align-items-center justify-content-between mb-1">
-            <strong style="font-size:.78rem">${label}</strong>
+            ${renderCheckCardTitle(chk.check_type, label)}
             <span class="badge ${badgeClass}" style="font-size:.65rem">${chk.alert_level.toUpperCase()}</span>
           </div>
           <div style="font-size:.72rem;color:#8b949e;margin-bottom:.3rem">${detail}</div>
