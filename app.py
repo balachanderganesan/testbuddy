@@ -394,6 +394,13 @@ def init_db():
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_subscriptions_target_chat
                 ON alert_subscriptions(target_key, chat_user_name);
+
+            CREATE TABLE IF NOT EXISTS target_settings (
+                target_key         TEXT PRIMARY KEY,
+                gchat_enabled       INTEGER NOT NULL DEFAULT 0,
+                gchat_webhook_url  TEXT    NOT NULL DEFAULT '',
+                updated_at         TEXT
+            );
         """)
         # Migrate existing DB: add new columns if absent
         _add_col_if_missing(conn, "recording_sessions", "poll_interval_sec INTEGER DEFAULT 300")
@@ -446,6 +453,7 @@ def init_db():
             "ha_process_uptime_sec INTEGER", "ha_core_count INTEGER",
         ]:
             _add_col_if_missing(conn, "memory_samples", col)
+        _load_persisted_target_settings(conn)
 
 
 def _add_col_if_missing(conn, table, col_def):
@@ -558,7 +566,22 @@ _poll_cfg_lock = threading.Lock()
 
 
 def _new_poll_config():
-    return {"enabled": False, "poll_interval": POLL_INTERVAL}
+    return {
+        "enabled": False,
+        "poll_interval": POLL_INTERVAL,
+        "gchat_enabled": False,
+        "gchat_webhook_url": "",
+    }
+
+
+def _target_status_dict(cfg, last_polled_at=None):
+    return {
+        "enabled": bool(cfg.get("enabled")),
+        "poll_interval": int(cfg.get("poll_interval") or POLL_INTERVAL),
+        "gchat_enabled": bool(cfg.get("gchat_enabled")),
+        "gchat_webhook_url": (cfg.get("gchat_webhook_url") or "").strip(),
+        "last_polled_at": last_polled_at,
+    }
 
 
 def _list_standard_bastion_ids(conn):
@@ -618,6 +641,76 @@ def _parse_poll_target(target):
         except ValueError:
             return None, None
     return None, None
+
+
+_GOOGLE_CHAT_WEBHOOK_HOSTS = {"chat.googleapis.com"}
+
+
+def _normalize_gchat_webhook(raw):
+    url = (raw or "").strip()
+    if len(url) >= 2 and url[0] == url[-1] and url[0] in ("'", '"'):
+        url = url[1:-1].strip()
+    if not url:
+        return "", None
+    parsed = urllib_parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host not in _GOOGLE_CHAT_WEBHOOK_HOSTS:
+        return None, "webhook must be an https Google Chat incoming-webhook URL"
+    return url, None
+
+
+def _load_persisted_target_settings(conn):
+    try:
+        rows = conn.execute(
+            "SELECT target_key, gchat_enabled, gchat_webhook_url FROM target_settings"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    with _poll_cfg_lock:
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                target_key = row["target_key"]
+                enabled = row["gchat_enabled"]
+                url = row["gchat_webhook_url"]
+            else:
+                target_key, enabled, url = row[0], row[1], row[2]
+            kind, value = _parse_poll_target(target_key)
+            if kind == "topology" and value in _topo_config:
+                _topo_config[value]["gchat_enabled"] = bool(enabled)
+                _topo_config[value]["gchat_webhook_url"] = url or ""
+            elif kind == "bastion":
+                cfg = _bastion_config.setdefault(int(value), _new_poll_config())
+                cfg["gchat_enabled"] = bool(enabled)
+                cfg["gchat_webhook_url"] = url or ""
+
+
+def _persist_gchat_settings(conn, target_key, cfg):
+    conn.execute("""
+        INSERT INTO target_settings(target_key, gchat_enabled, gchat_webhook_url, updated_at)
+        VALUES(?,?,?,?)
+        ON CONFLICT(target_key) DO UPDATE SET
+            gchat_enabled=excluded.gchat_enabled,
+            gchat_webhook_url=excluded.gchat_webhook_url,
+            updated_at=excluded.updated_at
+    """, (
+        target_key,
+        1 if cfg.get("gchat_enabled") else 0,
+        (cfg.get("gchat_webhook_url") or "").strip(),
+        datetime.utcnow().isoformat(),
+    ))
+
+
+def _gchat_settings_for_scope(topology_id, hypervisor_id=None):
+    with _poll_cfg_lock:
+        if topology_id == "standard_testbeds" and hypervisor_id is not None:
+            cfg = _bastion_config.get(hypervisor_id, _new_poll_config())
+        else:
+            cfg = _topo_config.get(topology_id, _new_poll_config())
+        enabled = bool(cfg.get("gchat_enabled"))
+        url = (cfg.get("gchat_webhook_url") or "").strip()
+    if not url and GOOGLE_CHAT_WEBHOOKS:
+        url = GOOGLE_CHAT_WEBHOOKS[0]
+    return enabled, url
 
 
 def _format_target_label(topology_id, hypervisor_name=None):
@@ -2344,17 +2437,7 @@ def _critical_clear_row_from_state(row):
     }
 
 
-def _format_google_chat_mentions(subscribers):
-    mentions = []
-    for sub in subscribers:
-        user_name = (sub.get("chat_user_name") or "").strip()
-        if not user_name:
-            continue
-        mentions.append(f"<{user_name}>")
-    return " ".join(mentions)
-
-
-def _build_google_chat_message(scope, subscribers, new_alerts, escalated_alerts, updated_alerts, recovered_rows):
+def _build_google_chat_message(scope, new_alerts, escalated_alerts, updated_alerts, recovered_rows):
     dashboard_url = _dashboard_url_for_scope(scope)
     lines = [
         "TestBuddy alert update",
@@ -2362,9 +2445,6 @@ def _build_google_chat_message(scope, subscribers, new_alerts, escalated_alerts,
         f"Open in TestBuddy: {dashboard_url}",
         f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
     ]
-    mention_line = _format_google_chat_mentions(subscribers)
-    if mention_line:
-        lines.append(f"Notifying: {mention_line}")
 
     def _append_section(title, rows, formatter):
         if not rows:
@@ -2384,27 +2464,26 @@ def _build_google_chat_message(scope, subscribers, new_alerts, escalated_alerts,
     return "\n".join(lines)
 
 
-def _send_google_chat_message(text):
-    if not GOOGLE_CHAT_WEBHOOKS:
+def _send_google_chat_message(text, webhook_url, scope_label=""):
+    if not webhook_url:
         return
 
     body = json.dumps({"text": text}).encode("utf-8")
-    for idx, webhook_url in enumerate(GOOGLE_CHAT_WEBHOOKS, start=1):
-        req = urllib_request.Request(
-            webhook_url,
-            data=body,
-            headers={"Content-Type": "application/json; charset=UTF-8"},
-            method="POST",
-        )
-        try:
-            with urllib_request.urlopen(req, timeout=GOOGLE_CHAT_TIMEOUT) as resp:
-                resp.read()
-            log.info("Google Chat alert delivered to webhook #%d", idx)
-        except (urllib_error.URLError, urllib_error.HTTPError, TimeoutError) as exc:
-            log.warning("Google Chat delivery failed for webhook #%d: %s", idx, exc)
+    req = urllib_request.Request(
+        webhook_url,
+        data=body,
+        headers={"Content-Type": "application/json; charset=UTF-8"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=GOOGLE_CHAT_TIMEOUT) as resp:
+            resp.read()
+        log.info("Google Chat alert delivered for %s", scope_label or "target")
+    except (urllib_error.URLError, urllib_error.HTTPError, TimeoutError) as exc:
+        log.warning("Google Chat delivery failed for %s: %s", scope_label or "target", exc)
 
 
-def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
+def _process_google_chat_alert_scope(topology_id, hypervisor_id=None, webhook_url=None):
     alerts, scope = _collect_active_alerts(topology_id, hypervisor_id, include_core=True)
     alerts.extend(_collect_offline_notification_alerts(topology_id, hypervisor_id))
     now_dt = datetime.utcnow()
@@ -2422,7 +2501,6 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
     noncritical_current_keys = set(all_current_by_key) - set(current_by_key)
 
     with get_db() as conn:
-        subscribers = _subscriptions_for_scope(conn, topology_id, hypervisor_id)
         if hypervisor_id is None:
             existing_rows = [dict(r) for r in conn.execute("""
                 SELECT *
@@ -2520,41 +2598,58 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None):
 
     message = _build_google_chat_message(
         scope,
-        subscribers,
         new_alerts,
         escalated_alerts,
         updated_alerts,
         recovered_rows,
     )
-    _send_google_chat_message(message)
+    _send_google_chat_message(message, webhook_url, scope.get("label") or topology_id)
 
 
 def _notification_scopes_for_poll_targets(poll_targets=None):
-    if not poll_targets:
-        return [(topology_id, None) for topology_id in TOPOLOGIES]
-
     scopes = []
-    topology_targets = set()
-    for target in poll_targets:
-        kind, value = _parse_poll_target(target)
-        if kind == "topology":
-            scope = (value, None)
-            if scope not in scopes:
-                scopes.append(scope)
-            topology_targets.add(value)
-        elif kind == "bastion":
-            scope = ("standard_testbeds", value)
-            if "standard_testbeds" not in topology_targets and scope not in scopes:
-                scopes.append(scope)
+    seen = set()
+
+    def _add(scope):
+        if scope not in seen:
+            seen.add(scope)
+            scopes.append(scope)
+
+    include_all_bastions = False
+    if not poll_targets:
+        for topology_id in TOPOLOGIES:
+            _add((topology_id, None))
+        include_all_bastions = True
+    else:
+        for target in poll_targets:
+            kind, value = _parse_poll_target(target)
+            if kind == "topology":
+                _add((value, None))
+                if value == "standard_testbeds":
+                    include_all_bastions = True
+            elif kind == "bastion":
+                _add(("standard_testbeds", value))
+    if include_all_bastions:
+        with get_db() as conn:
+            for hv_id in _list_standard_bastion_ids(conn):
+                _add(("standard_testbeds", hv_id))
     return scopes
 
 
 def _notify_google_chat_for_poll_targets(poll_targets=None):
-    if not GOOGLE_CHAT_WEBHOOKS:
-        return
     for topology_id, hypervisor_id in _notification_scopes_for_poll_targets(poll_targets):
+        enabled, webhook_url = _gchat_settings_for_scope(topology_id, hypervisor_id)
+        if not enabled:
+            continue
+        if not webhook_url:
+            log.warning(
+                "Google Chat enabled but no webhook configured for topology=%s hypervisor=%s",
+                topology_id,
+                hypervisor_id,
+            )
+            continue
         try:
-            _process_google_chat_alert_scope(topology_id, hypervisor_id)
+            _process_google_chat_alert_scope(topology_id, hypervisor_id, webhook_url)
         except Exception as exc:
             log.warning(
                 "Google Chat alert processing failed for topology=%s hypervisor=%s: %s",
@@ -3921,6 +4016,7 @@ def api_status():
                 "webhook_count": len(GOOGLE_CHAT_WEBHOOKS),
                 "notify_recoveries": GOOGLE_CHAT_NOTIFY_RECOVERIES,
                 "dashboard_base_url": _public_base_url(),
+                "per_testbed": True,
             },
         },
         "db": {
@@ -3931,11 +4027,7 @@ def api_status():
         },
         "server_time": datetime.utcnow().isoformat() + "Z",
         "topologies": {
-            tid: {
-                "enabled": cfg["enabled"],
-                "poll_interval": cfg["poll_interval"],
-                "last_polled_at": topo_last_polled.get(tid),
-            }
+            tid: _target_status_dict(cfg, topo_last_polled.get(tid))
             for tid, cfg in _topo_config.items()
         },
     })
@@ -3957,19 +4049,11 @@ def api_polling_status():
     with _poll_cfg_lock:
         topo_cfg = {tid: cfg.copy() for tid, cfg in _topo_config.items()}
     targets = {
-        tid: {
-            "enabled": cfg["enabled"],
-            "poll_interval": cfg["poll_interval"],
-            "last_polled_at": target_last_polled.get(tid),
-        }
+        tid: _target_status_dict(cfg, target_last_polled.get(tid))
         for tid, cfg in topo_cfg.items()
     }
     for target, cfg in bastion_cfg.items():
-        targets[target] = {
-            "enabled": cfg["enabled"],
-            "poll_interval": cfg["poll_interval"],
-            "last_polled_at": target_last_polled.get(target),
-        }
+        targets[target] = _target_status_dict(cfg, target_last_polled.get(target))
     return jsonify({
         "paused": _polling_paused,
         "topologies": targets,
@@ -4006,18 +4090,42 @@ def api_polling_config():
             cfg = _topo_config[value]
         else:
             cfg = _bastion_config.setdefault(value, _new_poll_config())
+        if "gchat_webhook_url" in data:
+            url, err = _normalize_gchat_webhook(data.get("gchat_webhook_url"))
+            if err:
+                return jsonify({"error": err}), 400
+            cfg["gchat_webhook_url"] = url
+            if not url:
+                cfg["gchat_enabled"] = False
+        if "gchat_enabled" in data:
+            want_gchat = bool(data["gchat_enabled"])
+            if want_gchat:
+                webhook = (cfg.get("gchat_webhook_url") or "").strip()
+                if not webhook and GOOGLE_CHAT_WEBHOOKS:
+                    cfg["gchat_webhook_url"] = GOOGLE_CHAT_WEBHOOKS[0]
+                    webhook = cfg["gchat_webhook_url"]
+                if not webhook:
+                    return jsonify({"error": "gchat_webhook_url is required"}), 400
+            cfg["gchat_enabled"] = want_gchat
         if "enabled" in data:
             cfg["enabled"] = bool(data["enabled"])
         if "poll_interval" in data:
             cfg["poll_interval"] = max(60, min(3600, int(data["poll_interval"])))
         updated = cfg.copy()
     with get_db() as conn:
+        _persist_gchat_settings(conn, target, updated)
         if kind == "topology":
             last_polled_at = _get_last_polled_at(conn, value)
         else:
             last_polled_at = _get_last_polled_at(conn, "standard_testbeds", value)
-    log.info(f"Polling target [{target}] config updated: {updated}")
-    return jsonify({"topology": target, **updated, "last_polled_at": last_polled_at})
+    log.info(
+        "Polling target [%s] config updated: enabled=%s interval=%s gchat=%s",
+        target,
+        updated.get("enabled"),
+        updated.get("poll_interval"),
+        "on" if updated.get("gchat_enabled") else "off",
+    )
+    return jsonify({"topology": target, **_target_status_dict(updated, last_polled_at)})
 
 
 @app.route("/api/bastion/list")
@@ -4069,6 +4177,10 @@ def api_bastion_delete(hv_id):
         conn.execute("DELETE FROM devices WHERE hypervisor_id = ?", (hv_id,))
         conn.execute(
             "DELETE FROM alert_subscriptions WHERE target_key=?",
+            (f"{BASTION_TARGET_PREFIX}{hv_id}",),
+        )
+        conn.execute(
+            "DELETE FROM target_settings WHERE target_key=?",
             (f"{BASTION_TARGET_PREFIX}{hv_id}",),
         )
         conn.execute(
@@ -4400,13 +4512,16 @@ if __name__ == "__main__":
     web_port = int(os.getenv("TESTBUDDY_PORT", "5001"))
     log.info("Initialising database...")
     init_db()
+    log.info(
+        "Google Chat notifications are per-testbed; enable a webhook on each testbed in the UI (recoveries=%s, dashboard=%s)",
+        "on" if GOOGLE_CHAT_NOTIFY_RECOVERIES else "off",
+        _public_base_url(),
+    )
     if GOOGLE_CHAT_WEBHOOKS:
         log.info(
-            "Google Chat notifications enabled (%d webhook%s, recoveries=%s, dashboard=%s)",
+            "Global Google Chat webhook fallback configured (%d URL%s)",
             len(GOOGLE_CHAT_WEBHOOKS),
             "" if len(GOOGLE_CHAT_WEBHOOKS) == 1 else "s",
-            "on" if GOOGLE_CHAT_NOTIFY_RECOVERIES else "off",
-            _public_base_url(),
         )
     log.info("Starting background collector...")
     threading.Thread(target=background_loop, daemon=True).start()

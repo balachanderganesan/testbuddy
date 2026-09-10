@@ -140,16 +140,7 @@
     .report-filter-chip { border:1px solid #30363d; background:#21262d; color:#c9d1d9;
                           border-radius:999px; font-size:.68rem; padding:.18rem .55rem; }
     .report-filter-chip.active { background:#1f6feb; border-color:#1f6feb; color:#fff; }
-    .subscriber-panel { border-left:1px solid #30363d; padding-left:.9rem; margin-left:.25rem; min-width:320px; }
-    .subscriber-list { display:flex; flex-wrap:wrap; gap:.4rem; }
-    .subscriber-chip { display:inline-flex; align-items:center; gap:.35rem; border:1px solid #30363d;
-                       background:#0d1117; border-radius:999px; padding:.18rem .55rem; font-size:.7rem; }
-    .subscriber-chip code { color:#8b949e; font-size:.68rem; margin:0; }
-    .subscriber-empty { color:#8b949e; font-size:.74rem; }
-    .subscriber-remove { border:0; background:transparent; color:#f85149; padding:0; line-height:1; }
-    .subscriber-remove:hover { color:#ff7b72; }
-    .subscriber-help { color:#8b949e; font-size:.68rem; line-height:1.35; max-width:520px; }
-    .subscriber-help code { color:#c9d1d9; font-size:.66rem; }
+    .gchat-help { color:#8b949e; font-size:.68rem; line-height:1.35; }
   </style>
 </head>
 <body>
@@ -288,27 +279,20 @@
       <option value="3600">1 hour</option>
     </select>
     <span style="font-size:.78rem;color:#8b949e" id="topoPollingLastPolled">Last poll: —</span>
-    <div class="subscriber-panel d-flex flex-column gap-2">
-      <div class="d-flex align-items-center gap-2 flex-wrap">
-        <span style="font-size:.78rem;color:#8b949e" id="subscriberTargetLabel">Subscribers:</span>
-        <span class="text-muted" style="font-size:.7rem">Exact target only</span>
-      </div>
-      <div id="subscriberList" class="subscriber-list">
-        <span class="subscriber-empty">No subscribers.</span>
-      </div>
-      <div class="d-flex align-items-center gap-2 flex-wrap">
-        <input id="subscriberNameInput" class="form-control form-control-sm" style="max-width:140px" placeholder="Name">
-        <input id="subscriberChatInput" class="form-control form-control-sm" style="min-width:210px;max-width:280px" placeholder="Chat User ID (users/...)">
-        <button class="btn btn-sm btn-outline-primary" onclick="addSubscription()">
-          <i class="bi bi-bell me-1"></i>Subscribe
-        </button>
-      </div>
-      <div class="subscriber-help">
-        Enter a Google Chat user resource such as <code>users/123456789012345678901</code>.
-        Email addresses will not work here. To get it, open the user in Google Chat and copy the
-        user resource ID from the Chat API or admin tooling your team already uses.
-      </div>
-    </div>
+  </div>
+  <div class="d-flex align-items-center gap-3 flex-wrap mt-2">
+    <span style="font-size:.78rem;color:#8b949e" id="topoGchatLabel">GChat:</span>
+    <button class="btn btn-sm" id="btnTopoGchat" onclick="toggleTopoGchat()" style="font-size:.75rem">
+      <i class="bi bi-toggle-off me-1" id="topoGchatIcon"></i><span id="topoGchatState">Disabled</span>
+    </button>
+    <input id="topoGchatWebhook" class="form-control form-control-sm"
+           style="min-width:280px;max-width:460px;font-size:.75rem"
+           placeholder="Google Chat webhook URL for this testbed"
+           onkeydown="if(event.key==='Enter'){event.preventDefault();saveTopoGchatWebhook();}">
+    <button class="btn btn-sm btn-outline-secondary" onclick="saveTopoGchatWebhook()" style="font-size:.75rem">
+      Save webhook
+    </button>
+    <span class="gchat-help">Each testbed can post to a different Chat space. Paste that space’s incoming webhook.</span>
   </div>
 </div>
 
@@ -1952,7 +1936,6 @@ function updatePollStatus(paused) {
 }
 
 let _topoPollingCache = {};  // cached per-target config (topology or bastion)
-let _activeSubscriptions = [];
 
 async function checkPollStatus() {
   try {
@@ -1984,54 +1967,14 @@ function _getActivePollingTargetLabel() {
     || `Bastion ${currentBastionId}`;
 }
 
-function renderSubscriptions(errorMessage="") {
-  const list = document.getElementById("subscriberList");
-  const label = document.getElementById("subscriberTargetLabel");
-  label.textContent = `Subscribers: ${_getActivePollingTargetLabel()}`;
-  if (errorMessage) {
-    list.innerHTML = `<span class="subscriber-empty" style="color:#f85149">${escapeHtml(errorMessage)}</span>`;
-    return;
-  }
-  if (!_activeSubscriptions.length) {
-    list.innerHTML = '<span class="subscriber-empty">No subscribers.</span>';
-    return;
-  }
-  list.innerHTML = _activeSubscriptions.map(sub => `
-    <span class="subscriber-chip">
-      <strong>${escapeHtml(sub.subscriber_name)}</strong>
-      <code>${escapeHtml(sub.chat_user_name)}</code>
-      <button class="subscriber-remove" title="Remove subscriber"
-              onclick="removeSubscription(${sub.id})">✕</button>
-    </span>
-  `).join("");
-}
-
-async function loadSubscriptions() {
-  const reportsVisible = document.getElementById("reportsPanel").style.display !== "none";
-  const statusVisible = document.getElementById("statusPanel").style.display !== "none";
-  const supported = currentTopology === "chennai"
-    || currentTopology === "standard_testbeds"
-    || currentTopology.startsWith("sc_tb");
-  if (reportsVisible || statusVisible || !supported) {
-    _activeSubscriptions = [];
-    renderSubscriptions();
-    return;
-  }
-  const target = _getActivePollingTargetId();
-  try {
-    const r = await fetch(`/api/subscriptions?target=${encodeURIComponent(target)}`);
-    const d = await r.json();
-    if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
-    _activeSubscriptions = d;
-    renderSubscriptions();
-  } catch (err) {
-    _activeSubscriptions = [];
-    renderSubscriptions(`Unable to load subscribers: ${err.message || err}`);
-  }
-}
-
 function _getEffectivePollingConfig() {
-  const defaultCfg = {enabled: false, poll_interval: 900, last_polled_at: null};
+  const defaultCfg = {
+    enabled: false,
+    poll_interval: 900,
+    last_polled_at: null,
+    gchat_enabled: false,
+    gchat_webhook_url: "",
+  };
   const targetId = _getActivePollingTargetId();
   const targetCfg = {...defaultCfg, ...(_topoPollingCache[targetId] || {})};
   if (currentTopology === "standard_testbeds" && currentBastionId != null) {
@@ -2039,7 +1982,12 @@ function _getEffectivePollingConfig() {
     if (allCfg.enabled) {
       return {
         targetId,
-        cfg: {...allCfg, last_polled_at: targetCfg.last_polled_at || allCfg.last_polled_at},
+        cfg: {
+          ...allCfg,
+          gchat_enabled: targetCfg.gchat_enabled,
+          gchat_webhook_url: targetCfg.gchat_webhook_url,
+          last_polled_at: targetCfg.last_polled_at || allCfg.last_polled_at,
+        },
         locked: true,
         label: _getActivePollingTargetLabel(),
         lockReason: "Inherited from All Standard Testbeds",
@@ -2094,6 +2042,25 @@ function updateTopoPollingBar() {
   }
   document.getElementById("topoPollingLastPolled").textContent =
     "Last poll: " + fmtTime(cfg.last_polled_at);
+
+  const gchatLabel = document.getElementById("topoGchatLabel");
+  const gchatBtn = document.getElementById("btnTopoGchat");
+  const gchatIcon = document.getElementById("topoGchatIcon");
+  const gchatState = document.getElementById("topoGchatState");
+  const webhookInput = document.getElementById("topoGchatWebhook");
+  gchatLabel.textContent = `GChat: ${label}`;
+  if (cfg.gchat_enabled) {
+    gchatBtn.className = "btn btn-sm btn-outline-success";
+    gchatIcon.className = "bi bi-toggle-on me-1";
+    gchatState.textContent = "Enabled";
+  } else {
+    gchatBtn.className = "btn btn-sm btn-outline-danger";
+    gchatIcon.className = "bi bi-toggle-off me-1";
+    gchatState.textContent = "Disabled";
+  }
+  if (document.activeElement !== webhookInput) {
+    webhookInput.value = cfg.gchat_webhook_url || "";
+  }
 }
 
 async function toggleTopoPolling() {
@@ -2140,47 +2107,45 @@ async function changeTopoInterval() {
   }
 }
 
-async function addSubscription() {
-  const subscriberName = document.getElementById("subscriberNameInput").value.trim();
-  const chatUserName = document.getElementById("subscriberChatInput").value.trim();
-  if (!subscriberName) {
-    toast("Subscriber name is required", "warn");
-    return;
-  }
-  if (!chatUserName.startsWith("users/") || /\s/.test(chatUserName)) {
-    toast("Chat User ID must look like users/123...", "warn");
-    return;
-  }
+async function _updateGchatConfig(payload) {
+  const targetId = _getActivePollingTargetId();
+  const r = await fetch("/api/polling/config", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({topology: targetId, ...payload}),
+  });
+  const d = await r.json();
+  if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+  _topoPollingCache[targetId] = {...(_topoPollingCache[targetId] || {}), ...d};
+  updateTopoPollingBar();
+  return d;
+}
+
+async function toggleTopoGchat() {
   try {
-    const r = await fetch("/api/subscriptions", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        target: _getActivePollingTargetId(),
-        subscriber_name: subscriberName,
-        chat_user_name: chatUserName,
-      }),
-    });
-    const d = await r.json();
-    if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
-    document.getElementById("subscriberNameInput").value = "";
-    document.getElementById("subscriberChatInput").value = "";
-    await loadSubscriptions();
-    toast(`Subscribed ${subscriberName}`);
+    const {cfg, label} = _getEffectivePollingConfig();
+    const webhook = document.getElementById("topoGchatWebhook").value.trim();
+    const newEnabled = !cfg.gchat_enabled;
+    if (newEnabled && !webhook) {
+      toast("Paste a Google Chat webhook for this testbed first", "warn");
+      document.getElementById("topoGchatWebhook").focus();
+      return;
+    }
+    await _updateGchatConfig({gchat_enabled: newEnabled, gchat_webhook_url: webhook});
+    toast(`${label}: Google Chat ${newEnabled ? "enabled" : "disabled"}`);
   } catch (err) {
-    toast(`Subscribe failed: ${err.message || err}`, "error");
+    toast(`Google Chat update failed: ${err.message || err}`, "error");
   }
 }
 
-async function removeSubscription(subId) {
+async function saveTopoGchatWebhook() {
   try {
-    const r = await fetch(`/api/subscriptions/${subId}`, {method: "DELETE"});
-    const d = await r.json();
-    if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
-    await loadSubscriptions();
-    toast("Subscriber removed");
+    const {label} = _getEffectivePollingConfig();
+    const webhook = document.getElementById("topoGchatWebhook").value.trim();
+    await _updateGchatConfig({gchat_webhook_url: webhook});
+    toast(webhook ? `${label}: Google Chat webhook saved` : `${label}: Google Chat webhook cleared`);
   } catch (err) {
-    toast(`Remove failed: ${err.message || err}`, "error");
+    toast(`Webhook save failed: ${err.message || err}`, "error");
   }
 }
 
@@ -3195,7 +3160,7 @@ async function loadStatus() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis(), checkPollStatus(), loadSubscriptions()]);
+  await Promise.all([loadSummary(), loadDevices(), loadCheckAlerts(), loadLogsAnalysis(), checkPollStatus()]);
   checkRecordingStatus();
   updateTopoPollingBar();
   // Refresh active-recordings section if Reports tab is visible

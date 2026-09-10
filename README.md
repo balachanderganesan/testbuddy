@@ -18,8 +18,7 @@ A real-time testbed verification dashboard for VeloCloud SD-WAN infrastructure. 
   - HA Active/Active panic log analysis
 - **HA Peer Monitoring** — Probes standby edge at `169.254.2.2` for memory, CPU, core dumps
 - **Core Dump Tracking** — Detects and lists core dump files with timestamps
-- **Google Chat Notifications** — Sends webhook messages for new or escalated memory, diagnostic-check, and core-dump alerts
-- **Per-Target Subscribers** — Lets users subscribe the active topology or bastion so Google Chat alerts tag the exact target’s subscribers
+- **Google Chat Notifications** — Per-testbed enable/disable with a dedicated incoming webhook so each testbed can post to a different Chat space
 - **Recording & Reports** — Record polling sessions at custom intervals, generate downloadable HTML reports with trend charts
 - **Shared Recording Support** — Multiple users can record different testbeds or bastions at the same time, with one active recording per target
 - **Pause/Resume Polling** — Toggle auto-polling on/off when the testbed is under heavy load
@@ -142,16 +141,20 @@ sudo systemctl restart testbuddy
 
 ### Google Chat alerting
 
-Set these in `.env` or in the process environment before starting `app.py`:
+Each topology or Standard Testbeds bastion has its own Google Chat toggle and incoming-webhook URL on the dashboard, next to the polling controls. Enable GChat for that testbed, paste the Chat space webhook, and Save. Settings persist in SQLite across restarts.
+
+Optional environment fallback (used only if a testbed is enabled without its own webhook):
 
 - `TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URL` — single incoming-webhook URL
-- `TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URLS` — comma or whitespace separated webhook URLs
+- `TESTBUDDY_GOOGLE_CHAT_WEBHOOK_URLS` — comma or whitespace separated webhook URLs; the first URL is the fallback
 - `TESTBUDDY_GOOGLE_CHAT_TIMEOUT` — webhook POST timeout in seconds, default `10`
 - `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES` — set to `1` to also post recovery messages when an alert clears
 - `TESTBUDDY_PUBLIC_URL` — dashboard origin used in alert links, for example `http://testbuddy.example.com:5001`
 
 Behavior:
 
+- Notifications are off until GChat is enabled for that testbed
+- Each enabled testbed posts to its own webhook, so different testbeds can use different Chat spaces
 - Sends messages after each completed poll, not on every page load or API call
 - Includes a dashboard link that opens the alerting topology or Standard Testbeds bastion
 - Posts only when an alert enters `critical`
@@ -159,13 +162,6 @@ Behavior:
 - Optionally posts when a previously critical alert clears if `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES=1`
 - Warning-only alerts and warning-only state changes never send Google Chat messages
 - Covers memory alerts, active diagnostic check alerts, and core-dump alerts when they are critical
-
-Subscriber behavior:
-
-- The dashboard has a self-service subscriber panel for the currently selected topology or Standard Testbeds bastion
-- Subscriptions are exact-target only: `standard_testbeds` does not inherit to bastions, and bastion subscriptions do not inherit upward
-- Subscribers must be entered as Google Chat user resource names such as `users/123456789012345678901`
-- Subscription management is open to anyone who can access the dashboard; there is no additional auth layer in v1
 
 ## API Reference
 
@@ -179,15 +175,9 @@ Subscriber behavior:
 | `/api/topologies` | GET | Available topology labels |
 | `/api/rediscover` | POST | Trigger topology re-discovery |
 | `/api/poll_now` | POST | Trigger immediate poll |
-| `/api/polling/status` | GET | Auto-polling state (paused/live) |
+| `/api/polling/status` | GET | Auto-polling state and per-testbed polling/GChat config |
 | `/api/polling/toggle` | POST | Pause or resume auto-polling |
-
-### Subscriptions
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/subscriptions?target=<target_key>` | GET | List exact-target subscribers for a topology or bastion |
-| `/api/subscriptions` | POST | Add a subscriber with `target`, `subscriber_name`, and `chat_user_name` |
-| `/api/subscriptions/<id>` | DELETE | Remove one subscriber entry |
+| `/api/polling/config` | POST | Update polling and Google Chat config for a topology or bastion |
 
 ### Diagnostic Checks
 | Endpoint | Method | Description |
@@ -231,7 +221,8 @@ SQLite with WAL mode. Schema auto-migrates via `_add_col_if_missing()`.
 | `devices` | Discovered VMs (edges/gateways) |
 | `memory_samples` | Per-poll memory/CPU/core metrics |
 | `device_checks` | Diagnostic check results and alerts |
-| `alert_subscriptions` | Per-target Google Chat subscribers |
+| `alert_notification_state` | Last notified alert state per device |
+| `target_settings` | Per-testbed Google Chat enable flag and webhook URL |
 | `recording_sessions` | Recording session metadata |
 
 ## Project Structure
@@ -262,3 +253,4 @@ The dashboard provides:
 ## License
 
 Internal tool — not licensed for external distribution.
+ 
