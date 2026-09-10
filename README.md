@@ -155,13 +155,12 @@ Behavior:
 
 - Notifications are off until GChat is enabled for that testbed
 - Each enabled testbed posts to its own webhook, so different testbeds can use different Chat spaces
+- A **Rules** modal next to the GChat toggle selects which modules notify that testbed, the minimum severity (critical or warning+), and warning/critical limits
+- Defaults match the previous behavior: Core Dump, Offline, HA Panic, DPDK Leaks, and Health at critical, with the same numeric limits as the dashboard
 - Sends messages after each completed poll, not on every page load or API call
 - Includes a dashboard link that opens the alerting topology or Standard Testbeds bastion
-- Posts only when an alert enters `critical`
 - DPDK leak notifications are delayed until the current non-zero leak streak has lasted at least 1 hour
-- Optionally posts when a previously critical alert clears if `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES=1`
-- Warning-only alerts and warning-only state changes never send Google Chat messages
-- Covers memory alerts, active diagnostic check alerts, and core-dump alerts when they are critical
+- Optionally posts when a previously notified alert clears if `TESTBUDDY_GOOGLE_CHAT_NOTIFY_RECOVERIES=1`
 
 ## API Reference
 

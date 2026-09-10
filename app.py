@@ -94,6 +94,116 @@ CRIT_FREE_PCT   =  8.0   # critical if free < 8%
 TREND_SAMPLES   = 20     # samples used for slope calculation
 WARN_SLOPE_KB_H = -200   # warn  if trending down > 200 KB/h
 CRIT_SLOPE_KB_H = -800   # crit  if trending down > 800 KB/h
+GCHAT_DEFAULT_ENABLED_SOURCES = ("core_dump", "offline", "ha_panic", "dpdk_leak", "health")
+GCHAT_MODULE_CATALOG = (
+    {
+        "id": "memory",
+        "label": "Memory",
+        "help": "Free memory percent and leak slope (KB/h, more negative is worse)",
+        "enabled_default": False,
+        "notify_level_default": "critical",
+        "fields": (
+            {"key": "warn_free_pct", "label": "Free %", "kind": "warn", "step": "0.1", "default": WARN_FREE_PCT, "unit": "%"},
+            {"key": "crit_free_pct", "label": "Free %", "kind": "crit", "step": "0.1", "default": CRIT_FREE_PCT, "unit": "%"},
+            {"key": "warn_slope_kb_h", "label": "Slope", "kind": "warn", "step": "1", "default": WARN_SLOPE_KB_H, "unit": "KB/h"},
+            {"key": "crit_slope_kb_h", "label": "Slope", "kind": "crit", "step": "1", "default": CRIT_SLOPE_KB_H, "unit": "KB/h"},
+        ),
+    },
+    {
+        "id": "health",
+        "label": "Health Report",
+        "help": "CPU 300s average and process memory usage",
+        "enabled_default": True,
+        "notify_level_default": "critical",
+        "fields": (
+            {"key": "warn_cpu_pct", "label": "CPU %", "kind": "warn", "step": "0.1", "default": 80.0, "unit": "%"},
+            {"key": "crit_cpu_pct", "label": "CPU %", "kind": "crit", "step": "0.1", "default": 95.0, "unit": "%"},
+            {"key": "warn_mem_pct", "label": "Mem %", "kind": "warn", "step": "0.1", "default": 85.0, "unit": "%"},
+            {"key": "crit_mem_pct", "label": "Mem %", "kind": "crit", "step": "0.1", "default": None, "unit": "%"},
+        ),
+    },
+    {
+        "id": "dpdk_leak",
+        "label": "DPDK Leaks",
+        "help": "dpdk_mbuf_leak count in vcdbgdump (critical delayed until the leak lasts 1 hour)",
+        "enabled_default": True,
+        "notify_level_default": "critical",
+        "fields": (
+            {"key": "warn_count", "label": "Leak count", "kind": "warn", "step": "1", "default": 1, "unit": ""},
+            {"key": "crit_count", "label": "Leak count", "kind": "crit", "step": "1", "default": 11, "unit": ""},
+        ),
+    },
+    {
+        "id": "core_dump",
+        "label": "Core Dump",
+        "help": "Core files present on the device or HA peer",
+        "enabled_default": True,
+        "notify_level_default": "critical",
+        "fields": (),
+    },
+    {
+        "id": "offline",
+        "label": "Offline",
+        "help": "Device did not respond to the last poll",
+        "enabled_default": True,
+        "notify_level_default": "critical",
+        "fields": (),
+    },
+    {
+        "id": "ha_panic",
+        "label": "HA Active/Active Panic",
+        "help": "ACTIVE/ACTIVE panic lines in edged.log",
+        "enabled_default": True,
+        "notify_level_default": "critical",
+        "fields": (),
+    },
+    {
+        "id": "tunnel",
+        "label": "Tunnel Status",
+        "help": "Unstable tunnels warn; dead tunnels are critical",
+        "enabled_default": False,
+        "notify_level_default": "critical",
+        "fields": (
+            {"key": "warn_unstable", "label": "Unstable", "kind": "warn", "step": "1", "default": 1, "unit": ""},
+            {"key": "crit_dead", "label": "Dead", "kind": "crit", "step": "1", "default": 1, "unit": ""},
+        ),
+    },
+    {
+        "id": "route",
+        "label": "Route Summary",
+        "help": "Percent change in total routes versus the previous poll",
+        "enabled_default": False,
+        "notify_level_default": "warning",
+        "fields": (
+            {"key": "warn_change_pct", "label": "Change %", "kind": "warn", "step": "0.1", "default": 2.0, "unit": "%"},
+            {"key": "crit_change_pct", "label": "Change %", "kind": "crit", "step": "0.1", "default": None, "unit": "%"},
+        ),
+    },
+    {
+        "id": "path",
+        "label": "Path Summary",
+        "help": "Peer or path count changed since the previous poll",
+        "enabled_default": False,
+        "notify_level_default": "warning",
+        "fields": (),
+    },
+    {
+        "id": "stale_pi",
+        "label": "Stale PI Flows",
+        "help": "Stale PI flow count increased",
+        "enabled_default": False,
+        "notify_level_default": "warning",
+        "fields": (),
+    },
+    {
+        "id": "stale_td",
+        "label": "Stale TD Flows",
+        "help": "Stale TD flow count increased",
+        "enabled_default": False,
+        "notify_level_default": "warning",
+        "fields": (),
+    },
+)
 
 
 def _load_dotenv(path):
@@ -399,6 +509,7 @@ def init_db():
                 target_key         TEXT PRIMARY KEY,
                 gchat_enabled       INTEGER NOT NULL DEFAULT 0,
                 gchat_webhook_url  TEXT    NOT NULL DEFAULT '',
+                gchat_modules_json  TEXT    NOT NULL DEFAULT '',
                 updated_at         TEXT
             );
         """)
@@ -453,6 +564,7 @@ def init_db():
             "ha_process_uptime_sec INTEGER", "ha_core_count INTEGER",
         ]:
             _add_col_if_missing(conn, "memory_samples", col)
+        _add_col_if_missing(conn, "target_settings", "gchat_modules_json TEXT")
         _load_persisted_target_settings(conn)
 
 
@@ -565,12 +677,88 @@ BASTION_TARGET_PREFIX = "bastion_"
 _poll_cfg_lock = threading.Lock()
 
 
+def _gchat_num(value, default=None):
+    if value is None or value == "":
+        return default
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return default
+    if num != num:  # NaN
+        return default
+    return num
+
+
+def _default_gchat_module(meta):
+    module = {
+        "enabled": bool(meta.get("enabled_default")),
+        "notify_level": meta.get("notify_level_default") or "critical",
+    }
+    for field in meta.get("fields") or ():
+        module[field["key"]] = field.get("default")
+    return module
+
+
+def _default_gchat_modules():
+    return {meta["id"]: _default_gchat_module(meta) for meta in GCHAT_MODULE_CATALOG}
+
+
+def _normalize_gchat_modules(raw):
+    incoming = raw if isinstance(raw, dict) else {}
+    normalized = {}
+    for meta in GCHAT_MODULE_CATALOG:
+        module_id = meta["id"]
+        base = _default_gchat_module(meta)
+        src = incoming.get(module_id) if isinstance(incoming.get(module_id), dict) else {}
+        if "enabled" in src:
+            base["enabled"] = bool(src["enabled"])
+        level = (src.get("notify_level") or base["notify_level"] or "critical").strip().lower()
+        base["notify_level"] = level if level in ("warning", "critical") else "critical"
+        for field in meta.get("fields") or ():
+            key = field["key"]
+            if key not in src:
+                continue
+            raw_val = src.get(key)
+            if raw_val in (None, ""):
+                base[key] = field.get("default")
+                continue
+            parsed = _gchat_num(raw_val, default=None)
+            base[key] = parsed if parsed is not None else field.get("default")
+        normalized[module_id] = base
+    return normalized
+
+
+def _gchat_catalog_public():
+    return [
+        {
+            "id": meta["id"],
+            "label": meta["label"],
+            "help": meta.get("help") or "",
+            "enabled_default": bool(meta.get("enabled_default")),
+            "notify_level_default": meta.get("notify_level_default") or "critical",
+            "fields": [
+                {
+                    "key": field["key"],
+                    "label": field["label"],
+                    "kind": field["kind"],
+                    "step": field.get("step") or "any",
+                    "default": field.get("default"),
+                    "unit": field.get("unit") or "",
+                }
+                for field in (meta.get("fields") or ())
+            ],
+        }
+        for meta in GCHAT_MODULE_CATALOG
+    ]
+
+
 def _new_poll_config():
     return {
         "enabled": False,
         "poll_interval": POLL_INTERVAL,
         "gchat_enabled": False,
         "gchat_webhook_url": "",
+        "gchat_modules": _default_gchat_modules(),
     }
 
 
@@ -580,6 +768,7 @@ def _target_status_dict(cfg, last_polled_at=None):
         "poll_interval": int(cfg.get("poll_interval") or POLL_INTERVAL),
         "gchat_enabled": bool(cfg.get("gchat_enabled")),
         "gchat_webhook_url": (cfg.get("gchat_webhook_url") or "").strip(),
+        "gchat_modules": _normalize_gchat_modules(cfg.get("gchat_modules")),
         "last_polled_at": last_polled_at,
     }
 
@@ -662,40 +851,55 @@ def _normalize_gchat_webhook(raw):
 def _load_persisted_target_settings(conn):
     try:
         rows = conn.execute(
-            "SELECT target_key, gchat_enabled, gchat_webhook_url FROM target_settings"
+            "SELECT target_key, gchat_enabled, gchat_webhook_url, gchat_modules_json FROM target_settings"
         ).fetchall()
     except sqlite3.OperationalError:
-        return
+        try:
+            rows = conn.execute(
+                "SELECT target_key, gchat_enabled, gchat_webhook_url FROM target_settings"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        rows = [tuple(row) + ("",) for row in rows]
     with _poll_cfg_lock:
         for row in rows:
             if isinstance(row, sqlite3.Row):
                 target_key = row["target_key"]
                 enabled = row["gchat_enabled"]
                 url = row["gchat_webhook_url"]
+                modules_json = row["gchat_modules_json"] if "gchat_modules_json" in row.keys() else ""
             else:
                 target_key, enabled, url = row[0], row[1], row[2]
+                modules_json = row[3] if len(row) > 3 else ""
+            modules = _normalize_gchat_modules(_safe_json(modules_json, {}))
             kind, value = _parse_poll_target(target_key)
             if kind == "topology" and value in _topo_config:
                 _topo_config[value]["gchat_enabled"] = bool(enabled)
                 _topo_config[value]["gchat_webhook_url"] = url or ""
+                _topo_config[value]["gchat_modules"] = modules
             elif kind == "bastion":
                 cfg = _bastion_config.setdefault(int(value), _new_poll_config())
                 cfg["gchat_enabled"] = bool(enabled)
                 cfg["gchat_webhook_url"] = url or ""
+                cfg["gchat_modules"] = modules
 
 
 def _persist_gchat_settings(conn, target_key, cfg):
     conn.execute("""
-        INSERT INTO target_settings(target_key, gchat_enabled, gchat_webhook_url, updated_at)
-        VALUES(?,?,?,?)
+        INSERT INTO target_settings(
+            target_key, gchat_enabled, gchat_webhook_url, gchat_modules_json, updated_at
+        )
+        VALUES(?,?,?,?,?)
         ON CONFLICT(target_key) DO UPDATE SET
             gchat_enabled=excluded.gchat_enabled,
             gchat_webhook_url=excluded.gchat_webhook_url,
+            gchat_modules_json=excluded.gchat_modules_json,
             updated_at=excluded.updated_at
     """, (
         target_key,
         1 if cfg.get("gchat_enabled") else 0,
         (cfg.get("gchat_webhook_url") or "").strip(),
+        json.dumps(_normalize_gchat_modules(cfg.get("gchat_modules"))),
         datetime.utcnow().isoformat(),
     ))
 
@@ -708,9 +912,10 @@ def _gchat_settings_for_scope(topology_id, hypervisor_id=None):
             cfg = _topo_config.get(topology_id, _new_poll_config())
         enabled = bool(cfg.get("gchat_enabled"))
         url = (cfg.get("gchat_webhook_url") or "").strip()
+        modules = _normalize_gchat_modules(cfg.get("gchat_modules"))
     if not url and GOOGLE_CHAT_WEBHOOKS:
         url = GOOGLE_CHAT_WEBHOOKS[0]
-    return enabled, url
+    return enabled, url, modules
 
 
 def _format_target_label(topology_id, hypervisor_name=None):
@@ -2100,7 +2305,123 @@ CHECK_ALERT_LABELS = {
     "offline": "Offline",
 }
 
-GOOGLE_CHAT_ALERT_SOURCES = {"core_dump", "offline", "ha_panic", "dpdk_leak", "health"}
+GOOGLE_CHAT_ALERT_SOURCES = set(GCHAT_DEFAULT_ENABLED_SOURCES)
+
+
+def _escalate_gchat_level(current, new):
+    return new if ALERT_SEVERITY_RANK.get(new, 0) > ALERT_SEVERITY_RANK.get(current, 0) else current
+
+
+def _gchat_recompute_level(alert, mod):
+    """Re-evaluate an alert using this testbed's GChat warning/critical limits."""
+    source = alert.get("alert_source")
+    result = alert.get("result") if isinstance(alert.get("result"), dict) else {}
+    if isinstance(alert.get("result"), list):
+        result_list = alert.get("result")
+    else:
+        result_list = result.get("peers") or result.get("segments") or []
+
+    if source == "memory":
+        current = alert.get("current") or {}
+        free_pct = _gchat_num(current.get("free_pct"))
+        slope = _gchat_num(alert.get("slope_kb_h"))
+        warn_free = _gchat_num(mod.get("warn_free_pct"), WARN_FREE_PCT)
+        crit_free = _gchat_num(mod.get("crit_free_pct"), CRIT_FREE_PCT)
+        warn_slope = _gchat_num(mod.get("warn_slope_kb_h"), WARN_SLOPE_KB_H)
+        crit_slope = _gchat_num(mod.get("crit_slope_kb_h"), CRIT_SLOPE_KB_H)
+        if free_pct is None:
+            return alert.get("alert") or "ok"
+        if free_pct < crit_free or (slope is not None and slope < crit_slope):
+            return "critical"
+        if free_pct < warn_free or (slope is not None and slope < warn_slope):
+            return "warning"
+        return "ok"
+
+    if source == "health":
+        if not result:
+            return alert.get("alert") or "ok"
+        level = "ok"
+        cpu = _gchat_num(result.get("cpu_300s_avg_pct"))
+        mem = _gchat_num(result.get("edged_mem_usage_pct"))
+        if mem is None:
+            mem = _gchat_num(result.get("gatewayd_mem_usage_pct"))
+        warn_cpu = _gchat_num(mod.get("warn_cpu_pct"), 80.0)
+        crit_cpu = _gchat_num(mod.get("crit_cpu_pct"), 95.0)
+        warn_mem = _gchat_num(mod.get("warn_mem_pct"), 85.0)
+        crit_mem = _gchat_num(mod.get("crit_mem_pct"))
+        if cpu is not None:
+            if crit_cpu is not None and cpu > crit_cpu:
+                level = _escalate_gchat_level(level, "critical")
+            elif warn_cpu is not None and cpu > warn_cpu:
+                level = _escalate_gchat_level(level, "warning")
+        if mem is not None:
+            if crit_mem is not None and mem > crit_mem:
+                level = _escalate_gchat_level(level, "critical")
+            elif warn_mem is not None and mem > warn_mem:
+                level = _escalate_gchat_level(level, "warning")
+        return level
+
+    if source == "dpdk_leak":
+        count = _gchat_num((result or {}).get("leak_count"))
+        if count is None:
+            return alert.get("alert") or "ok"
+        warn_count = _gchat_num(mod.get("warn_count"), 1) or 0
+        crit_count = _gchat_num(mod.get("crit_count"), 11) or 0
+        if count >= crit_count:
+            return "critical"
+        if count >= warn_count:
+            return "warning"
+        return "ok"
+
+    if source == "tunnel":
+        entries = alert.get("result") if isinstance(alert.get("result"), list) else result_list
+        total_dead = 0
+        total_unstable = 0
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                continue
+            total_dead += int(_gchat_num(entry.get("dead"), 0) or 0)
+            total_unstable += int(_gchat_num(entry.get("unstable"), 0) or 0)
+        if not entries and not result:
+            return alert.get("alert") or "ok"
+        crit_dead = int(_gchat_num(mod.get("crit_dead"), 1) or 0)
+        warn_unstable = int(_gchat_num(mod.get("warn_unstable"), 1) or 0)
+        if total_dead >= max(crit_dead, 1):
+            return "critical"
+        if total_unstable >= max(warn_unstable, 1):
+            return "warning"
+        return "ok"
+
+    if source == "route":
+        total_routes = _gchat_num(result.get("_total_routes"))
+        prev_total = _gchat_num(result.get("_prev_total"))
+        if not total_routes or not prev_total or prev_total <= 0:
+            return alert.get("alert") or "ok"
+        change_pct = abs(total_routes - prev_total) / prev_total * 100
+        crit_change = _gchat_num(mod.get("crit_change_pct"))
+        warn_change = _gchat_num(mod.get("warn_change_pct"), 2.0)
+        if crit_change is not None and change_pct > crit_change:
+            return "critical"
+        if warn_change is not None and change_pct > warn_change:
+            return "warning"
+        return "ok"
+
+    return alert.get("alert") or "ok"
+
+
+def _gchat_prepare_alert(alert, modules, now_dt):
+    source = alert.get("alert_source")
+    mod = modules.get(source) if isinstance(modules, dict) else None
+    if not mod or not mod.get("enabled"):
+        return None
+    prepared = dict(alert)
+    prepared["alert"] = _gchat_recompute_level(alert, mod)
+    min_level = mod.get("notify_level") or "critical"
+    if ALERT_SEVERITY_RANK.get(prepared["alert"], 0) < ALERT_SEVERITY_RANK.get(min_level, 2):
+        return None
+    if not _alert_notification_ready(prepared, now_dt):
+        return None
+    return prepared
 
 
 def _epoch_to_iso(ts):
@@ -2177,6 +2498,7 @@ def _collect_active_alerts(topology_id, hypervisor_id=None, include_core=False):
             check_params = (topology_id,)
         check_rows = [dict(r) for r in conn.execute(f"""
             SELECT dc.device_id, dc.check_type, dc.alert_level, dc.alert_detail, dc.ts,
+                   dc.result_json,
                    (
                        SELECT MIN(dc3.ts)
                        FROM device_checks dc3
@@ -2281,6 +2603,7 @@ def _collect_active_alerts(topology_id, hypervisor_id=None, include_core=False):
             "slope_kb_h": None,
             "current": None,
             "ha": None,
+            "result": _safe_json(row.get("result_json"), {}),
         })
 
     alerts.sort(key=lambda a: (
@@ -2456,10 +2779,10 @@ def _build_google_chat_message(scope, new_alerts, escalated_alerts, updated_aler
         if len(rows) > 15:
             lines.append(f"- ... {len(rows) - 15} more")
 
-    _append_section("New critical alerts", new_alerts, _alert_line)
-    _append_section("Escalated to critical", escalated_alerts, _alert_line)
+    _append_section("New alerts", new_alerts, _alert_line)
+    _append_section("Escalated alerts", escalated_alerts, _alert_line)
     if GOOGLE_CHAT_NOTIFY_RECOVERIES:
-        _append_section("Critical alerts cleared", recovered_rows, _recovered_alert_line)
+        _append_section("Alerts cleared", recovered_rows, _recovered_alert_line)
 
     return "\n".join(lines)
 
@@ -2483,21 +2806,20 @@ def _send_google_chat_message(text, webhook_url, scope_label=""):
         log.warning("Google Chat delivery failed for %s: %s", scope_label or "target", exc)
 
 
-def _process_google_chat_alert_scope(topology_id, hypervisor_id=None, webhook_url=None):
+def _process_google_chat_alert_scope(topology_id, hypervisor_id=None, webhook_url=None, modules=None):
+    modules = _normalize_gchat_modules(modules)
     alerts, scope = _collect_active_alerts(topology_id, hypervisor_id, include_core=True)
     alerts.extend(_collect_offline_notification_alerts(topology_id, hypervisor_id))
     now_dt = datetime.utcnow()
     now = now_dt.isoformat()
-    all_current_by_key = {
-        _alert_key(alert): alert
-        for alert in alerts
-        if alert.get("alert_source") in GOOGLE_CHAT_ALERT_SOURCES
-    }
-    current_by_key = {
-        key: alert
-        for key, alert in all_current_by_key.items()
-        if alert.get("alert") == "critical" and _alert_notification_ready(alert, now_dt)
-    }
+    all_current_by_key = {}
+    current_by_key = {}
+    for alert in alerts:
+        prepared = _gchat_prepare_alert(alert, modules, now_dt)
+        key = _alert_key(alert)
+        all_current_by_key[key] = alert
+        if prepared:
+            current_by_key[key] = prepared
     noncritical_current_keys = set(all_current_by_key) - set(current_by_key)
 
     with get_db() as conn:
@@ -2526,12 +2848,9 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None, webhook_ur
             previous_level = prev["last_level"] if prev else "ok"
             event_type = None
 
-            if alert["alert"] == "critical" and (not prev or not prev.get("active")):
+            if not prev or not prev.get("active"):
                 event_type = "new"
-            elif (
-                alert["alert"] == "critical"
-                and ALERT_SEVERITY_RANK.get(previous_level, 0) < ALERT_SEVERITY_RANK["critical"]
-            ):
+            elif ALERT_SEVERITY_RANK.get(alert["alert"], 0) > ALERT_SEVERITY_RANK.get(previous_level, 0):
                 event_type = "escalated"
 
             if event_type == "new":
@@ -2587,8 +2906,7 @@ def _process_google_chat_alert_scope(topology_id, hypervisor_id=None, webhook_ur
             """, (now, key))
             if (
                 GOOGLE_CHAT_NOTIFY_RECOVERIES
-                and row.get("alert_source") in GOOGLE_CHAT_ALERT_SOURCES
-                and row.get("last_level") == "critical"
+                and ALERT_SEVERITY_RANK.get(row.get("last_level"), 0) >= ALERT_SEVERITY_RANK["warning"]
                 and key not in noncritical_current_keys
             ):
                 recovered_rows.append(_critical_clear_row_from_state(row))
@@ -2638,7 +2956,7 @@ def _notification_scopes_for_poll_targets(poll_targets=None):
 
 def _notify_google_chat_for_poll_targets(poll_targets=None):
     for topology_id, hypervisor_id in _notification_scopes_for_poll_targets(poll_targets):
-        enabled, webhook_url = _gchat_settings_for_scope(topology_id, hypervisor_id)
+        enabled, webhook_url, modules = _gchat_settings_for_scope(topology_id, hypervisor_id)
         if not enabled:
             continue
         if not webhook_url:
@@ -2649,7 +2967,7 @@ def _notify_google_chat_for_poll_targets(poll_targets=None):
             )
             continue
         try:
-            _process_google_chat_alert_scope(topology_id, hypervisor_id, webhook_url)
+            _process_google_chat_alert_scope(topology_id, hypervisor_id, webhook_url, modules)
         except Exception as exc:
             log.warning(
                 "Google Chat alert processing failed for topology=%s hypervisor=%s: %s",
@@ -4056,6 +4374,7 @@ def api_polling_status():
         targets[target] = _target_status_dict(cfg, target_last_polled.get(target))
     return jsonify({
         "paused": _polling_paused,
+        "gchat_catalog": _gchat_catalog_public(),
         "topologies": targets,
     })
 
@@ -4107,6 +4426,8 @@ def api_polling_config():
                 if not webhook:
                     return jsonify({"error": "gchat_webhook_url is required"}), 400
             cfg["gchat_enabled"] = want_gchat
+        if "gchat_modules" in data:
+            cfg["gchat_modules"] = _normalize_gchat_modules(data.get("gchat_modules"))
         if "enabled" in data:
             cfg["enabled"] = bool(data["enabled"])
         if "poll_interval" in data:
